@@ -16,3 +16,7 @@ __pycache__
 /runs
 /tests
 /meta_files
+inputs/demo/mytest/
+inputs_face_one/
+weights_old/
+results/

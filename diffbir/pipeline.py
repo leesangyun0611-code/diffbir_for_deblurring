@@ -52,8 +52,8 @@ class Pipeline:
         cond_fn: Guidance | None,
         device: str,
     ) -> None:
-        self.cleaner = cleaner
-        self.cldm = cldm
+        self.cleaner = cleaner #stage1
+        self.cldm = cldm #stage2
         self.diffusion = diffusion
         self.cond_fn = cond_fn
         self.device = device
