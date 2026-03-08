@@ -1,7 +1,6 @@
 import os
 from typing import overload, Generator, List
 from argparse import Namespace
-
 import numpy as np
 import torch
 from PIL import Image

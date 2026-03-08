@@ -1,4 +1,5 @@
 from typing import overload, Tuple
+import time
 
 import torch
 from torch import nn
@@ -42,6 +43,18 @@ def pad_to_multiples_of(imgs: torch.Tensor, multiple: int) -> torch.Tensor:
     return F.pad(imgs, pad=(0, pw, 0, ph), mode="constant", value=0)
 
 
+def tick():
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    return time.perf_counter()
+
+
+def tock(t, name):
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    print(f"[TIME] {name}: {time.perf_counter() - t:.4f} sec")
+
+
 class Pipeline:
 
     def __init__(
@@ -52,8 +65,8 @@ class Pipeline:
         cond_fn: Guidance | None,
         device: str,
     ) -> None:
-        self.cleaner = cleaner #stage1
-        self.cldm = cldm #stage2
+        self.cleaner = cleaner
+        self.cldm = cldm
         self.diffusion = diffusion
         self.cond_fn = cond_fn
         self.device = device
@@ -66,7 +79,8 @@ class Pipeline:
     @overload
     def apply_cleaner(
         self, lq: torch.Tensor, tiled: bool, tile_size: int, tile_stride: int
-    ) -> torch.Tensor: ...
+    ) -> torch.Tensor:
+        ...
 
     def apply_cldm(
         self,
@@ -95,24 +109,23 @@ class Pipeline:
         order: int,
     ) -> torch.Tensor:
         bs, _, h0, w0 = cond_img.shape
-        # 1. Pad condition image for VAE encoding (scale factor = 8)
-        # 1.1 Whether or not tiled inference is used, the input image size for the VAE must be a multiple of 8.
+
         if not vae_encoder_tiled and not cldm_tiled:
-            # For backward capability, pad condition to be multiples of 64
             cond_img = pad_to_multiples_of(cond_img, multiple=64)
         else:
             cond_img = pad_to_multiples_of(cond_img, multiple=8)
-        # 1.2 Check vae encoder tile size
+
         if vae_encoder_tiled and (
             cond_img.size(2) < vae_encoder_tile_size
             or cond_img.size(3) < vae_encoder_tile_size
         ):
             print("[VAE Encoder]: the input size is tiny and unnecessary to tile.")
             vae_encoder_tiled = False
-        # 1.3 If tiled inference is used, then the size of each tile also needs to be a multiple of 8.
+
         if vae_encoder_tiled:
             if vae_encoder_tile_size % 8 != 0:
                 raise ValueError("VAE encoder tile size must be a multiple of 8")
+
         with VRAMPeakMonitor("encoding condition image"):
             cond = self.cldm.prepare_condition(
                 cond_img,
@@ -126,23 +139,22 @@ class Pipeline:
                 vae_encoder_tiled,
                 vae_encoder_tile_size,
             )
+
         h1, w1 = cond["c_img"].shape[2:]
-        # 2. Pad condition latent for U-Net inference (scale factor = 8)
-        # 2.1 Check cldm tile size
+
         if cldm_tiled and (h1 < cldm_tile_size // 8 or w1 < cldm_tile_size // 8):
             print("[Diffusion]: the input size is tiny and unnecessary to tile.")
             cldm_tiled = False
-        # 2.2 Pad conditon latent
+
         if not cldm_tiled:
-            # If tiled inference is not used, apply padding directly.
             cond["c_img"] = pad_to_multiples_of(cond["c_img"], multiple=8)
             uncond["c_img"] = pad_to_multiples_of(uncond["c_img"], multiple=8)
         else:
-            # If tiled inference is used, then the latent tile size must be a multiple of 8.
             if cldm_tile_size % 64 != 0:
                 raise ValueError("Diffusion tile size must be a multiple of 64")
+
         h2, w2 = cond["c_img"].shape[2:]
-        # 3. Prepare start point of sampling
+
         if start_point_type == "cond":
             x_0 = cond["c_img"]
             x_T = self.diffusion.q_sample(
@@ -157,7 +169,7 @@ class Pipeline:
             )
         else:
             x_T = torch.randn((bs, 4, h2, w2), dtype=torch.float32, device=self.device)
-        # 4. Noise augmentation
+
         if noise_aug > 0:
             cond["c_img"] = self.diffusion.q_sample(
                 x_start=cond["c_img"],
@@ -169,11 +181,9 @@ class Pipeline:
         if self.cond_fn:
             self.cond_fn.load_target(cond_img * 2 - 1)
 
-        # 5. Set control strength
         control_scales = self.cldm.control_scales
         self.cldm.control_scales = [strength] * 13
 
-        # 6. Run sampler
         betas = self.diffusion.betas
         parameterization = self.diffusion.parameterization
         if sampler_type == "spaced":
@@ -199,6 +209,7 @@ class Pipeline:
             )
         else:
             raise NotImplementedError(sampler_type)
+
         with VRAMPeakMonitor("sampling"):
             z = sampler.sample(
                 model=self.cldm,
@@ -214,20 +225,21 @@ class Pipeline:
                 x_T=x_T,
                 progress=True,
             )
-            # Remove padding for U-Net input
             z = z[..., :h1, :w1]
-        # 7. Decode generated latents
+
         if vae_decoder_tiled and (
             h1 < vae_decoder_tile_size // 8 or w1 < vae_decoder_tile_size // 8
         ):
             print("[VAE Decoder]: the input size is tiny and unnecessary to tile.")
             vae_decoder_tiled = False
+
         with VRAMPeakMonitor("decoding generated latent"):
             x = self.cldm.vae_decode(
                 z,
                 vae_decoder_tiled,
                 vae_decoder_tile_size // 8,
             )
+
         x = x[:, :, :h0, :w0]
         self.cldm.control_scales = control_scales
         return x
@@ -262,6 +274,9 @@ class Pipeline:
         eta: float,
         order: int,
     ) -> np.ndarray:
+        t_total = tick()
+
+        t = tick()
         lq_tensor = (
             torch.tensor(lq, dtype=torch.float32, device=self.device)
             .div(255)
@@ -270,14 +285,21 @@ class Pipeline:
             .contiguous()
         )
         self.set_output_size(lq_tensor.size())
+        tock(t, "input numpy -> tensor")
+
+        t = tick()
         with VRAMPeakMonitor("applying cleaner"):
             cond_img = self.apply_cleaner(
                 lq_tensor, cleaner_tiled, cleaner_tile_size, cleaner_tile_stride
             )
+        tock(t, "stage1 cleaner")
+
         assert all(x >= 512 for x in cond_img.shape[2:]), (
             "The resolution of stage-1 model output should be greater than 512, "
             "since it will be used as condition for stage-2 model."
         )
+
+        t = tick()
         sample = self.apply_cldm(
             cond_img,
             steps,
@@ -303,6 +325,9 @@ class Pipeline:
             eta,
             order,
         )
+        tock(t, "stage2 cldm")
+
+        t = tick()
         sample = F.interpolate(
             wavelet_reconstruction((sample + 1) / 2, cond_img),
             size=self.output_size,
@@ -318,6 +343,9 @@ class Pipeline:
             .cpu()
             .numpy()
         )
+        tock(t, "final postprocess")
+
+        tock(t_total, "pipeline total")
         return sample
 
 
@@ -356,6 +384,7 @@ class BSRNetPipeline(Pipeline):
             )
         else:
             model = self.cleaner
+
         output_upscale4 = model(lq)
         if min(self.output_size) < 512:
             output = resize_short_edge_to(output_upscale4, size=512)
@@ -379,7 +408,6 @@ class SwinIRPipeline(Pipeline):
                 raise ValueError("SwinIR (cleaner) tile size must be a multiple of 64")
 
         if not tiled:
-            # For backward capability, put the resize operation before forward
             if min(lq.shape[2:]) < 512:
                 lq = resize_short_edge_to(lq, size=512)
             h0, w0 = lq.shape[2:]
@@ -414,6 +442,7 @@ class SCUNetPipeline(Pipeline):
             )
         else:
             model = self.cleaner
+
         output = model(lq)
         if min(output.shape[2:]) < 512:
             output = resize_short_edge_to(output, size=512)

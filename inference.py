@@ -283,7 +283,7 @@ def parse_args() -> Namespace:
         "--precision", type=str, default="fp16", choices=["fp32", "fp16", "bf16"]
     )
     parser.add_argument("--llava_bit", type=str, default="4", choices=["16", "8", "4"])
-
+    
     return parser.parse_args()
 
 
