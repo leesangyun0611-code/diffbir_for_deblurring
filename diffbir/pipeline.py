@@ -1,3 +1,4 @@
+import os
 from typing import overload, Tuple
 import time
 
@@ -289,10 +290,47 @@ class Pipeline:
 
         t = tick()
         with VRAMPeakMonitor("applying cleaner"):
-            cond_img = self.apply_cleaner(
-                lq_tensor, cleaner_tiled, cleaner_tile_size, cleaner_tile_stride
-            )
+            if hasattr(self, "external_cond_img") and self.external_cond_img is not None:
+                cond_img = (
+                    torch.tensor(
+                        self.external_cond_img,
+                        dtype=torch.float32,
+                        device=self.device,
+                    )
+                    .div(255)
+                    .clamp(0, 1)
+                    .permute(2, 0, 1)
+                    .unsqueeze(0)
+                    .contiguous()
+                )
+                print("[INFO] Using external stage1 output as cond_img")
+            else:
+                cond_img = self.apply_cleaner(
+                    lq_tensor, cleaner_tiled, cleaner_tile_size, cleaner_tile_stride
+                )
         tock(t, "stage1 cleaner")
+
+        # save stage1 output
+        if hasattr(self, "debug_save_dir") and hasattr(self, "debug_file_stem"):
+            stage1_dir = os.path.join(self.debug_save_dir, "stage1_outputs")
+            os.makedirs(stage1_dir, exist_ok=True)
+
+            cond_to_save = (
+                cond_img[0]
+                .detach()
+                .clamp(0, 1)
+                .permute(1, 2, 0)
+                .cpu()
+                .numpy()
+            )
+            cond_to_save = (cond_to_save * 255).round().astype("uint8")
+
+            save_path = os.path.join(
+                stage1_dir,
+                f"{self.debug_file_stem}_stage1.png"
+            )
+            Image.fromarray(cond_to_save).save(save_path)
+            print(f"[SAVE] stage1 output saved to {save_path}")
 
         assert all(x >= 512 for x in cond_img.shape[2:]), (
             "The resolution of stage-1 model output should be greater than 512, "

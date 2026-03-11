@@ -176,6 +176,8 @@ class InferenceLoop:
             samples = []
             for i in range(num_batches):
                 n_inputs = min((i + 1) * batch_size, n_samples) - i * batch_size
+                self.pipeline.debug_file_stem = self.loop_ctx["file_stem"]
+                self.pipeline.debug_save_dir = self.save_dir
                 with torch.autocast(self.args.device, auto_cast_type):
                     batch_samples = self.pipeline.run(
                         np.tile(lq[None], (n_inputs, 1, 1, 1)),

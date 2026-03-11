@@ -283,10 +283,20 @@ def parse_args() -> Namespace:
         "--precision", type=str, default="fp16", choices=["fp32", "fp16", "bf16"]
     )
     parser.add_argument("--llava_bit", type=str, default="4", choices=["16", "8", "4"])
+    parser.add_argument(
+    "--stage1_ckpt",
+    type=str,
+    default="",
+    help="Path to fine-tuned stage1 checkpoint.",
+    )
     
+    parser.add_argument(
+    "--external_stage1_dir",
+    type=str,
+    default="",
+    help="Directory of precomputed stage1 output images (e.g. NAFNet outputs).",
+    )
     return parser.parse_args()
-
-
 def main():
     args = parse_args()
     args.device = check_device(args.device)
