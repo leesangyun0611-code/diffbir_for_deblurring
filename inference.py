@@ -54,6 +54,7 @@ DEFAULT_NEG_PROMPT = (
 
 def parse_args() -> Namespace:
     parser = ArgumentParser()
+
     # model parameters
     parser.add_argument(
         "--task",
@@ -84,6 +85,7 @@ def parse_args() -> Namespace:
         default="",
         help="Path to saved checkpoint. Only works when version is custom.",
     )
+
     # sampling parameters
     parser.add_argument(
         "--sampler",
@@ -122,6 +124,24 @@ def parse_args() -> Namespace:
             "For DiffBIR v1 and v2, setting the start point types to 'cond' can make the results much more stable "
             "and ensure that the outcomes from ODE samplers like DDIM and DPMS are normal. "
             "However, this adjustment may lead to a decrease in sample quality."
+        ),
+    )
+    parser.add_argument(
+        "--start_point_t",
+        type=int,
+        default=-1,
+        help=(
+            "When start_point_type='cond', create the start latent by q_sample at timestep t. "
+            "-1 means using the last diffusion timestep (T-1)."
+        ),
+    )
+    parser.add_argument(
+        "--start_point_noise_scale",
+        type=float,
+        default=1.0,
+        help=(
+            "Scale of Gaussian noise used when start_point_type='cond'. "
+            "Keep 1.0 for the standard q_sample setting."
         ),
     )
     parser.add_argument(
@@ -217,7 +237,7 @@ def parse_args() -> Namespace:
         "--s_tmax",
         type=float,
         default=300,
-        help="Maximum  sigma for adding ramdomness to sampling. Only works with some edm samplers.",
+        help="Maximum sigma for adding ramdomness to sampling. Only works with some edm samplers.",
     )
     parser.add_argument(
         "--s_noise",
@@ -244,6 +264,7 @@ def parse_args() -> Namespace:
         help="Control strength from ControlNet. Less strength, more creative.",
     )
     parser.add_argument("--batch_size", type=int, default=1, help="Nothing to say.")
+
     # guidance parameters
     parser.add_argument(
         "--guidance", action="store_true", help="Enable restoration guidance."
@@ -261,6 +282,7 @@ def parse_args() -> Namespace:
         default=0.0,
         help="Learning rate of optimizing the guidance loss function.",
     )
+
     # common parameters
     parser.add_argument(
         "--input",
@@ -275,6 +297,7 @@ def parse_args() -> Namespace:
         "--output", type=str, required=True, help="Path to save restored results."
     )
     parser.add_argument("--seed", type=int, default=231)
+
     # mps has not been tested
     parser.add_argument(
         "--device", type=str, default="cuda", choices=["cpu", "cuda", "mps"]
@@ -283,7 +306,7 @@ def parse_args() -> Namespace:
         "--precision", type=str, default="fp16", choices=["fp32", "fp16", "bf16"]
     )
     parser.add_argument("--llava_bit", type=str, default="4", choices=["16", "8", "4"])
-    
+
     return parser.parse_args()
 
 
@@ -302,6 +325,7 @@ def main():
         loops[args.task](args).run()
     else:
         CustomInferenceLoop(args).run()
+
     print("done!")
 
 

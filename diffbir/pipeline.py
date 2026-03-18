@@ -98,6 +98,8 @@ class Pipeline:
         neg_prompt: str,
         cfg_scale: float,
         start_point_type: str,
+        start_point_t: int,
+        start_point_noise_scale: float,
         sampler_type: str,
         noise_aug: int,
         rescale_cfg: bool,
@@ -157,15 +159,33 @@ class Pipeline:
 
         if start_point_type == "cond":
             x_0 = cond["c_img"]
+
+            if start_point_t < 0:
+                t_start = self.diffusion.num_timesteps - 1
+            else:
+                t_start = min(start_point_t, self.diffusion.num_timesteps - 1)
+
+            t_tensor = torch.full(
+                (bs,),
+                t_start,
+                dtype=torch.long,
+                device=self.device,
+            )
+
+            eps = (
+                torch.randn(x_0.shape, dtype=torch.float32, device=self.device)
+                * start_point_noise_scale
+            )
+
             x_T = self.diffusion.q_sample(
-                x_0,
-                torch.full(
-                    (bs,),
-                    self.diffusion.num_timesteps - 1,
-                    dtype=torch.long,
-                    device=self.device,
-                ),
-                torch.randn(x_0.shape, dtype=torch.float32, device=self.device),
+                x_start=x_0,
+                t=t_tensor,
+                noise=eps,
+            )
+
+            print(
+                f"[start_point_type=cond] t_start={t_start}, "
+                f"noise_scale={start_point_noise_scale}"
             )
         else:
             x_T = torch.randn((bs, 4, h2, w2), dtype=torch.float32, device=self.device)
@@ -264,6 +284,8 @@ class Pipeline:
         neg_prompt: str,
         cfg_scale: float,
         start_point_type: str,
+        start_point_t: int,
+        start_point_noise_scale: float,
         sampler_type: str,
         noise_aug: int,
         rescale_cfg: bool,
@@ -315,6 +337,8 @@ class Pipeline:
             neg_prompt,
             cfg_scale,
             start_point_type,
+            start_point_t,
+            start_point_noise_scale,
             sampler_type,
             noise_aug,
             rescale_cfg,

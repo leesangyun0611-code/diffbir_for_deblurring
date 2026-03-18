@@ -60,6 +60,7 @@ class InferenceLoop:
             f"load pretrained stable diffusion, "
             f"unused weights: {unused}, missing weights: {missing}"
         )
+
         # load controlnet weight
         if self.args.version == "v1":
             if self.args.task == "face":
@@ -77,8 +78,9 @@ class InferenceLoop:
             # v2.1
             control_weight = load_model_from_url(MODELS["v2.1"])
         self.cldm.load_controlnet_from_ckpt(control_weight)
-        print(f"load controlnet weight")
+        print("load controlnet weight")
         self.cldm.eval().to(self.args.device)
+
         cast_type = {
             "fp32": torch.float32,
             "fp16": torch.float16,
@@ -104,6 +106,7 @@ class InferenceLoop:
             cond_fn_cls = WeightedMSEGuidance
         else:
             raise ValueError(self.args.g_loss)
+
         self.cond_fn = cond_fn_cls(
             self.args.g_scale,
             self.args.g_start,
@@ -160,20 +163,20 @@ class InferenceLoop:
         }[self.args.precision]
 
         for lq in self.load_lq():
-            # prepare prompt
             with VRAMPeakMonitor("applying captioner"):
                 caption = self.captioner(lq)
+
             pos_prompt = ", ".join(
                 [text for text in [caption, self.args.pos_prompt] if text]
             )
             neg_prompt = self.args.neg_prompt
             lq = self.after_load_lq(lq)
 
-            # batch process
             n_samples = self.args.n_samples
             batch_size = self.args.batch_size
             num_batches = (n_samples + batch_size - 1) // batch_size
             samples = []
+
             for i in range(num_batches):
                 n_inputs = min((i + 1) * batch_size, n_samples) - i * batch_size
                 with torch.autocast(self.args.device, auto_cast_type):
@@ -195,6 +198,8 @@ class InferenceLoop:
                         neg_prompt,
                         self.args.cfg_scale,
                         self.args.start_point_type,
+                        self.args.start_point_t,
+                        self.args.start_point_noise_scale,
                         self.args.sampler,
                         self.args.noise_aug,
                         self.args.rescale_cfg,
@@ -206,11 +211,13 @@ class InferenceLoop:
                         self.args.order,
                     )
                 samples.extend(list(batch_samples))
+
             self.save(samples, pos_prompt, neg_prompt)
 
     def save(self, samples: List[np.ndarray], pos_prompt: str, neg_prompt: str) -> None:
         file_stem = self.loop_ctx["file_stem"]
         assert len(samples) == self.args.n_samples
+
         for i, sample in enumerate(samples):
             file_name = (
                 f"{file_stem}_{i}.png"
@@ -220,6 +227,7 @@ class InferenceLoop:
             save_path = os.path.join(self.save_dir, file_name)
             Image.fromarray(sample).save(save_path)
             print(f"save result to {save_path}")
+
         csv_path = os.path.join(self.save_dir, "prompt.csv")
         df = pd.DataFrame(
             {
