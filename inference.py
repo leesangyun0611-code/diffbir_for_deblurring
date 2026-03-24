@@ -1,6 +1,9 @@
 from argparse import ArgumentParser, Namespace
+import tempfile
+from pathlib import Path
 
 import torch
+from PIL import Image
 
 from accelerate.utils import set_seed
 from diffbir.inference import (
@@ -50,6 +53,83 @@ DEFAULT_NEG_PROMPT = (
     "CG Style, 3D render, unreal engine, blurring, dirty, messy, worst quality, low quality, frames, watermark, "
     "signature, jpeg artifacts, deformed, lowres, over-smooth."
 )
+
+
+def maybe_resize_input_to_small(input_path: str, max_side: int = 511):
+    """
+    Resize only large input images so that BOTH width and height are <= max_side,
+    while preserving aspect ratio.
+
+    - If the input is already small enough, keep it unchanged.
+    - If input_path is a directory, create a temporary directory containing either:
+      * resized copies for large images
+      * original-size copies for already-small images
+    - Original inputs are never modified.
+
+    Returns:
+        new_input_path: str
+            Original path if no resize was needed, otherwise a temp file/dir path.
+        resized_any: bool
+            Whether any resize happened.
+    """
+    src = Path(input_path)
+    valid_exts = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
+
+    def _resize_one(in_file: Path, out_file: Path) -> bool:
+        with Image.open(in_file) as img:
+            w, h = img.size
+
+            # 이미 작은 이미지는 resize 안 함
+            if w <= max_side and h <= max_side:
+                img.save(out_file)
+                return False
+
+            scale = min(max_side / w, max_side / h)
+            new_w = max(1, int(w * scale))
+            new_h = max(1, int(h * scale))
+
+            # 안전하게 둘 다 max_side 이하 보장
+            new_w = min(new_w, max_side)
+            new_h = min(new_h, max_side)
+
+            resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+            out_file.parent.mkdir(parents=True, exist_ok=True)
+            resized.save(out_file)
+
+            print(f"[AutoResize] {in_file.name}: {w}x{h} -> {new_w}x{new_h}")
+            return True
+
+    # 단일 파일 입력
+    if src.is_file():
+        if src.suffix.lower() not in valid_exts:
+            return input_path, False
+
+        tmp_dir = Path(tempfile.mkdtemp(prefix="diffbir_small_input_"))
+        out_file = tmp_dir / src.name
+        resized = _resize_one(src, out_file)
+        return (str(out_file) if resized else input_path), resized
+
+    # 폴더 입력
+    if src.is_dir():
+        files = sorted(
+            [p for p in src.iterdir() if p.is_file() and p.suffix.lower() in valid_exts]
+        )
+
+        if not files:
+            return input_path, False
+
+        tmp_dir = Path(tempfile.mkdtemp(prefix="diffbir_small_input_dir_"))
+        resized_any = False
+
+        for f in files:
+            out_file = tmp_dir / f.name
+            resized = _resize_one(f, out_file)
+            if resized:
+                resized_any = True
+
+        return (str(tmp_dir) if resized_any else input_path), resized_any
+
+    return input_path, False
 
 
 def parse_args() -> Namespace:
@@ -284,16 +364,25 @@ def parse_args() -> Namespace:
     )
     parser.add_argument("--llava_bit", type=str, default="4", choices=["16", "8", "4"])
     parser.add_argument(
-    "--start_point_noise_scale",
-    type=float,
-    default=0.0,
-    help="Noise scale when using cond start point.",
+        "--start_point_noise_scale",
+        type=float,
+        default=0.0,
+        help="Noise scale when using cond start point.",
     )
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+
+    # Auto-resize only when input images are larger than 511 on either side.
+    # Aspect ratio is preserved, and already-small images are left untouched.
+    args.input, resized = maybe_resize_input_to_small(args.input, max_side=511)
+    if resized:
+        print(f"[AutoResize] Using resized input path: {args.input}")
+    else:
+        print("[AutoResize] Input already small enough. No resize applied.")
+
     args.device = check_device(args.device)
     set_seed(args.seed)
 
