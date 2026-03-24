@@ -1,11 +1,10 @@
 from argparse import ArgumentParser, Namespace
-import tempfile
 from pathlib import Path
 
 import torch
 from PIL import Image
-
 from accelerate.utils import set_seed
+
 from diffbir.inference import (
     BSRInferenceLoop,
     BFRInferenceLoop,
@@ -60,26 +59,29 @@ def maybe_resize_input_to_small(input_path: str, max_side: int = 511):
     Resize only large input images so that BOTH width and height are <= max_side,
     while preserving aspect ratio.
 
-    - If the input is already small enough, keep it unchanged.
-    - If input_path is a directory, create a temporary directory containing either:
-      * resized copies for large images
-      * original-size copies for already-small images
-    - Original inputs are never modified.
+    Behavior:
+    - If input is a directory:
+        save processed files into <input_dir>_resized
+    - If input is a single file:
+        save processed file into <parent_dir>/<stem>_resized<suffix>
+    - Small images are copied without resizing
+    - Original inputs are never modified
 
     Returns:
         new_input_path: str
-            Original path if no resize was needed, otherwise a temp file/dir path.
+            Original path if no resize was needed, otherwise resized file/dir path
         resized_any: bool
-            Whether any resize happened.
+            Whether any image was actually resized
     """
     src = Path(input_path)
     valid_exts = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
 
-    def _resize_one(in_file: Path, out_file: Path) -> bool:
+    def _save_processed(in_file: Path, out_file: Path) -> bool:
         with Image.open(in_file) as img:
             w, h = img.size
+            out_file.parent.mkdir(parents=True, exist_ok=True)
 
-            # 이미 작은 이미지는 resize 안 함
+            # If already small enough, just copy-save as is
             if w <= max_side and h <= max_side:
                 img.save(out_file)
                 return False
@@ -88,28 +90,26 @@ def maybe_resize_input_to_small(input_path: str, max_side: int = 511):
             new_w = max(1, int(w * scale))
             new_h = max(1, int(h * scale))
 
-            # 안전하게 둘 다 max_side 이하 보장
+            # Safety clamp
             new_w = min(new_w, max_side)
             new_h = min(new_h, max_side)
 
             resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-            out_file.parent.mkdir(parents=True, exist_ok=True)
             resized.save(out_file)
 
             print(f"[AutoResize] {in_file.name}: {w}x{h} -> {new_w}x{new_h}")
             return True
 
-    # 단일 파일 입력
+    # Single file input
     if src.is_file():
         if src.suffix.lower() not in valid_exts:
             return input_path, False
 
-        tmp_dir = Path(tempfile.mkdtemp(prefix="diffbir_small_input_"))
-        out_file = tmp_dir / src.name
-        resized = _resize_one(src, out_file)
+        out_file = src.parent / f"{src.stem}_resized{src.suffix}"
+        resized = _save_processed(src, out_file)
         return (str(out_file) if resized else input_path), resized
 
-    # 폴더 입력
+    # Directory input
     if src.is_dir():
         files = sorted(
             [p for p in src.iterdir() if p.is_file() and p.suffix.lower() in valid_exts]
@@ -118,16 +118,17 @@ def maybe_resize_input_to_small(input_path: str, max_side: int = 511):
         if not files:
             return input_path, False
 
-        tmp_dir = Path(tempfile.mkdtemp(prefix="diffbir_small_input_dir_"))
-        resized_any = False
+        resize_dir = src.parent / f"{src.name}_resized"
+        resize_dir.mkdir(parents=True, exist_ok=True)
 
+        resized_any = False
         for f in files:
-            out_file = tmp_dir / f.name
-            resized = _resize_one(f, out_file)
+            out_file = resize_dir / f.name
+            resized = _save_processed(f, out_file)
             if resized:
                 resized_any = True
 
-        return (str(tmp_dir) if resized_any else input_path), resized_any
+        return (str(resize_dir) if resized_any else input_path), resized_any
 
     return input_path, False
 
@@ -164,6 +165,7 @@ def parse_args() -> Namespace:
         default="",
         help="Path to saved checkpoint. Only works when version is custom.",
     )
+
     # sampling parameters
     parser.add_argument(
         "--sampler",
@@ -324,6 +326,7 @@ def parse_args() -> Namespace:
         help="Control strength from ControlNet. Less strength, more creative.",
     )
     parser.add_argument("--batch_size", type=int, default=1, help="Nothing to say.")
+
     # guidance parameters
     parser.add_argument(
         "--guidance", action="store_true", help="Enable restoration guidance."
@@ -341,6 +344,7 @@ def parse_args() -> Namespace:
         default=0.0,
         help="Learning rate of optimizing the guidance loss function.",
     )
+
     # common parameters
     parser.add_argument(
         "--input",
@@ -355,6 +359,7 @@ def parse_args() -> Namespace:
         "--output", type=str, required=True, help="Path to save restored results."
     )
     parser.add_argument("--seed", type=int, default=231)
+
     # mps has not been tested
     parser.add_argument(
         "--device", type=str, default="cuda", choices=["cpu", "cuda", "mps"]
@@ -369,6 +374,7 @@ def parse_args() -> Namespace:
         default=0.0,
         help="Noise scale when using cond start point.",
     )
+
     return parser.parse_args()
 
 
@@ -396,6 +402,7 @@ def main():
         loops[args.task](args).run()
     else:
         CustomInferenceLoop(args).run()
+
     print("done!")
 
 
