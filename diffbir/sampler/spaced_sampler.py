@@ -7,32 +7,14 @@ from tqdm import tqdm
 from .sampler import Sampler
 from ..model.gaussian_diffusion import extract_into_tensor
 from ..model.cldm import ControlLDM
-from ..utils.common import make_tiled_fn, trace_vram_usage
+from ..utils.common import make_tiled_fn
+from ..utils.cond_fn import Guidance, WeightedMSEGuidance
 
 
-# https://github.com/openai/guided-diffusion/blob/main/guided_diffusion/respace.py
 def space_timesteps(num_timesteps, section_counts):
-    """
-    Create a list of timesteps to use from an original diffusion process,
-    given the number of timesteps we want to take from equally-sized portions
-    of the original process.
-    For example, if there's 300 timesteps and the section counts are [10,15,20]
-    then the first 100 timesteps are strided to be 10 timesteps, the second 100
-    are strided to be 15 timesteps, and the final 100 are strided to be 20.
-    If the stride is a string starting with "ddim", then the fixed striding
-    from the DDIM paper is used, and only one section is allowed.
-    :param num_timesteps: the number of diffusion steps in the original
-                          process to divide up.
-    :param section_counts: either a list of numbers, or a string containing
-                           comma-separated numbers, indicating the step count
-                           per section. As a special case, use "ddimN" where N
-                           is a number of steps to use the striding from the
-                           DDIM paper.
-    :return: a set of diffusion steps from the original process to use.
-    """
     if isinstance(section_counts, str):
         if section_counts.startswith("ddim"):
-            desired_count = int(section_counts[len("ddim") :])
+            desired_count = int(section_counts[len("ddim"):])
             for i in range(1, num_timesteps):
                 if len(range(0, num_timesteps, i)) == desired_count:
                     return set(range(0, num_timesteps, i))
@@ -40,10 +22,12 @@ def space_timesteps(num_timesteps, section_counts):
                 f"cannot create exactly {num_timesteps} steps with an integer stride"
             )
         section_counts = [int(x) for x in section_counts.split(",")]
+
     size_per = num_timesteps // len(section_counts)
     extra = num_timesteps % len(section_counts)
     start_idx = 0
     all_steps = []
+
     for i, section_count in enumerate(section_counts):
         size = size_per + (1 if i < extra else 0)
         if size < section_count:
@@ -54,13 +38,16 @@ def space_timesteps(num_timesteps, section_counts):
             frac_stride = 1
         else:
             frac_stride = (size - 1) / (section_count - 1)
+
         cur_idx = 0.0
         taken_steps = []
         for _ in range(section_count):
             taken_steps.append(start_idx + round(cur_idx))
             cur_idx += frac_stride
+
         all_steps += taken_steps
         start_idx += size
+
     return set(all_steps)
 
 
@@ -82,9 +69,7 @@ class SpacedSampler(Sampler):
             if i in used_timesteps:
                 betas.append(1 - alpha_cumprod / last_alpha_cumprod)
                 last_alpha_cumprod = alpha_cumprod
-        self.timesteps = np.array(
-            sorted(list(used_timesteps)), dtype=np.int32
-        )  # e.g. [0, 10, 20, ...]
+        self.timesteps = np.array(sorted(list(used_timesteps)), dtype=np.int32)
 
         betas = np.array(betas, dtype=np.float64)
         alphas = 1.0 - betas
@@ -158,6 +143,80 @@ class SpacedSampler(Sampler):
             model_output = model_uncond + cfg_scale * (model_cond - model_uncond)
         return model_output
 
+    def _should_apply_guidance(
+        self,
+        cond_fn: Optional[Guidance],
+        model_t: torch.Tensor,
+    ) -> bool:
+        if cond_fn is None:
+            return False
+        if cond_fn.scale == 0:
+            return False
+        t_scalar = int(model_t[0].item())
+        return (t_scalar < cond_fn.t_start) and (t_scalar > cond_fn.t_stop)
+
+    def _apply_restoration_guidance(
+        self,
+        model: ControlLDM,
+        pred_x0: torch.Tensor,
+        model_t: torch.Tensor,
+        cond_fn: Optional[Guidance],
+        guidance_decoder_tiled: bool = False,
+        guidance_decoder_tile_size: int = -1,
+    ) -> torch.Tensor:
+        if not self._should_apply_guidance(cond_fn, model_t):
+            return pred_x0
+
+        out = pred_x0
+        t_scalar = int(model_t[0].item())
+
+        # weighted MSE guidance is defined in RGB space
+        use_rgb_guidance = (cond_fn.space == "rgb") or isinstance(
+            cond_fn, WeightedMSEGuidance
+        )
+
+        for _ in range(cond_fn.repeat):
+            if not use_rgb_guidance:
+                target_latent = getattr(cond_fn, "target_latent", None)
+                if target_latent is None:
+                    raise ValueError("Guidance target_latent is not set.")
+
+                g, _ = cond_fn(target_latent, out, t_scalar)
+                out = out + g
+            else:
+                if cond_fn.target is None:
+                    raise ValueError("Guidance RGB target is not set.")
+
+                with torch.enable_grad():
+                    z = out.detach().clone().float().requires_grad_(True)
+
+                    # force the guidance branch to run in fp32
+                    with torch.autocast(device_type=z.device.type, enabled=False):
+                        pred_rgb = model.vae_decode(
+                            z,
+                            guidance_decoder_tiled,
+                            guidance_decoder_tile_size,
+                        ).float()
+
+                        target_rgb = cond_fn.target.float()
+
+                        if isinstance(cond_fn, WeightedMSEGuidance):
+                            with torch.no_grad():
+                                w = cond_fn._get_weight((target_rgb + 1) / 2).float()
+                            loss = ((pred_rgb - target_rgb).pow(2) * w).mean(
+                                (1, 2, 3)
+                            ).sum()
+                        else:
+                            loss = (pred_rgb - target_rgb).pow(2).mean(
+                                (1, 2, 3)
+                            ).sum()
+
+                    g = -torch.autograd.grad(loss, z)[0] * float(cond_fn.scale)
+
+                out = out + g
+
+        return out
+
     @torch.no_grad()
     def p_sample(
         self,
@@ -168,16 +227,28 @@ class SpacedSampler(Sampler):
         cond: Dict[str, torch.Tensor],
         uncond: Optional[Dict[str, torch.Tensor]],
         cfg_scale: float,
+        cond_fn: Optional[Guidance] = None,
+        guidance_decoder_tiled: bool = False,
+        guidance_decoder_tile_size: int = -1,
     ) -> torch.Tensor:
-        # predict x_0
         model_output = self.apply_model(model, x, model_t, cond, uncond, cfg_scale)
+
         if self.parameterization == "eps":
             pred_x0 = self._predict_xstart_from_eps(x, t, model_output)
         else:
             pred_x0 = self._predict_xstart_from_v(x, t, model_output)
-        # calculate mean and variance of next state
+
+        pred_x0 = self._apply_restoration_guidance(
+            model=model,
+            pred_x0=pred_x0,
+            model_t=model_t,
+            cond_fn=cond_fn,
+            guidance_decoder_tiled=guidance_decoder_tiled,
+            guidance_decoder_tile_size=guidance_decoder_tile_size,
+        )
+
         mean, variance = self.q_posterior_mean_variance(pred_x0, x, t)
-        # sample next state
+
         noise = torch.randn_like(x)
         nonzero_mask = (t != 0).float().view(-1, *([1] * (len(x.shape) - 1)))
         x_prev = mean + nonzero_mask * torch.sqrt(variance) * noise
@@ -198,9 +269,13 @@ class SpacedSampler(Sampler):
         tile_stride: int = -1,
         x_T: torch.Tensor | None = None,
         progress: bool = True,
+        cond_fn: Optional[Guidance] = None,
+        guidance_decoder_tiled: bool = False,
+        guidance_decoder_tile_size: int = -1,
     ) -> torch.Tensor:
         self.make_schedule(steps)
         self.to(device)
+
         if tiled:
             forward = model.forward
             model.forward = make_tiled_fn(
@@ -217,6 +292,7 @@ class SpacedSampler(Sampler):
                 tile_size,
                 tile_stride,
             )
+
         if x_T is None:
             x_T = torch.randn(x_size, device=device, dtype=torch.float32)
 
@@ -238,6 +314,9 @@ class SpacedSampler(Sampler):
                 cond,
                 uncond,
                 cur_cfg_scale,
+                cond_fn=cond_fn,
+                guidance_decoder_tiled=guidance_decoder_tiled,
+                guidance_decoder_tile_size=guidance_decoder_tile_size,
             )
 
         if tiled:
