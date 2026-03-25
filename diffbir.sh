@@ -10,7 +10,7 @@ set -euo pipefail
 GPU=1
 DEVICE="cuda"                 # cpu / cuda / mps
 PRECISION="fp16"              # fp32 / fp16 / bf16
-SEED=554
+SEED=45
 
 # ---------- Task / version ----------
 TASK="sr"                     # sr / face / denoise / unaligned_face
@@ -18,8 +18,8 @@ VERSION="v2.1"                # v1 / v2 / v2.1 / custom
 UPSCALE=1
 
 # ---------- Paths ----------
-INPUT_DIR="inputs/demo/mytest_face"
-OUTPUT_DIR="results/v21_bsr_test_RG_s=0"
+INPUT_DIR="inputs/demo/mytest"
+OUTPUT_DIR="results/v21_sr_spaced_scale1_RG_s=2.0_rgb"
 
 # ---------- Optional input resize ----------
 AUTO_RESIZE=false             # true / false
@@ -62,7 +62,7 @@ VAE_DECODER_TILE_SIZE=256
 
 # ---------- Optional noise / sampler extras ----------
 NOISE_AUG=0
-ETA=0S
+ETA=0
 ORDER=2
 STRENGTH=1.0
 S_CHURN=0
@@ -71,11 +71,11 @@ S_TMAX=999
 S_NOISE=1.0
 
 # ---------- Guidance ----------
-GUIDANCE=false                # true / false
+GUIDANCE=true              # true / false
 G_LOSS="w_mse"                # mse / w_mse
-G_SCALE=0.0                   # restoration guidance strength
+G_SCALE=2.0             # restoration guidance strength
 G_START=1001                  # guidance active when t < G_START
-G_STOP=-1                     # guidance active when t > G_STOP
+G_STOP=1                     # guidance active when t > G_STOP
 G_SPACE="rgb"              # latent / rgb
 G_REPEAT=1                    # guidance updates per step
 
