@@ -3,7 +3,6 @@ set -euo pipefail
 
 # ==========================================
 # DiffBIR experiment launcher
-# Edit only the variables in this section.
 # Run with: bash diffbir.sh
 # ==========================================
 
@@ -11,7 +10,7 @@ set -euo pipefail
 GPU=1
 DEVICE="cuda"                 # cpu / cuda / mps
 PRECISION="fp16"              # fp32 / fp16 / bf16
-SEED=554                      # -1 for random seed, or set a specific integer for reproducibility
+SEED=554
 
 # ---------- Task / version ----------
 TASK="sr"                     # sr / face / denoise / unaligned_face
@@ -22,10 +21,9 @@ UPSCALE=2
 INPUT_DIR="inputs/demo/mytest_face"
 OUTPUT_DIR="results/v21_bfr_scale2_test_eta0.1"
 
-# ---------- Evaluation ----------
-EVAL_METRICS=true             # true / false
-GT_DIR="GT"                   # GT image directory
-RESIZE_PRED_TO_GT=false       # true / false
+# ---------- Optional input resize ----------
+AUTO_RESIZE=false             # true / false
+MAX_INPUT_SIDE=511            # only used when AUTO_RESIZE=true
 
 # ---------- Sampling ----------
 SAMPLER="spaced"              # spaced / ddim / dpm++_m2 / edm_euler / ...
@@ -35,7 +33,7 @@ RESCALE_CFG=false             # true / false
 
 # ---------- Start point ----------
 START_POINT_TYPE="cond"       # cond / noise
-START_POINT_NOISE_SCALE=""    # e.g. 0.3, 1.0 ; leave empty to disable, 낮을수록 cond많이 유지
+START_POINT_NOISE_SCALE=""    # e.g. 0.3, 1.0 ; leave empty to disable
 
 # ---------- Batch / outputs ----------
 N_SAMPLES=1
@@ -47,10 +45,10 @@ POS_PROMPT="sharp, detailed, high quality"
 NEG_PROMPT="blurry, low quality, artifacts"
 
 # ---------- Tile toggles ----------
-CLEANER_TILED=false           # Stage1
-CLDM_TILED=false              # controlnet+LDM
-VAE_ENCODER_TILED=false       # VAE encoder
-VAE_DECODER_TILED=false       # VAE decoder
+CLEANER_TILED=false
+CLDM_TILED=false
+VAE_ENCODER_TILED=false
+VAE_DECODER_TILED=false
 
 # ---------- Tile sizes / strides ----------
 CLEANER_TILE_SIZE=512
@@ -61,18 +59,12 @@ CLDM_TILE_STRIDE=128
 
 VAE_ENCODER_TILE_SIZE=1024
 VAE_DECODER_TILE_SIZE=256
-# Tile size는 모델이 한 번에 처리하는 최대 크기보다 작거나 같아야 함. (예: 512x512 모델이면 tile size <= 512)
-# Stride는 tile이 겹치는 정도를 조절. stride < tile_size이면 tile이 겹쳐서 처리됨. 겹치는 부분이 많을수록 경계 아티팩트 감소에 도움될 수 있지만 처리 시간 증가 가능. 실험을 통해 적절한 tile size와 stride 조합을 찾아보는 것을 권장. 예: tile_size=512, stride=256은 50% 겹치는 타일을 생성.
 
 # ---------- Optional noise / sampler extras ----------
 NOISE_AUG=0
-# condition latent(c_img) 자체에 추가로 noise를 넣는 옵션.
-# stage1 condition을 일부러 흐리게 만들어 robustness를 볼 때 사용.
-# 보통 0으로 두는 것이 안전.
-# 값이 커질수록 condition 신뢰도가 떨어져 품질 저하 가능.
-ETA=0.1                       # DDIM sampler에서 stochasticity를 조절.
-ORDER=2                       # DPM-Solver 계열 sampler에서 사용하는 적분 차수(order). 높을수록 정확
-STRENGTH=1.0                  # 일부 sampler/설정에서 초기 latent를 얼마나 강하게 유지/변형할지 관련된 계수
+ETA=0.1
+ORDER=2
+STRENGTH=1.0
 S_CHURN=0
 S_TMIN=0
 S_TMAX=999
@@ -80,17 +72,20 @@ S_NOISE=1.0
 
 # ---------- Guidance ----------
 GUIDANCE=false                # true / false
-G_LOSS="mse"                  # mse / w_mse
-G_SCALE=0.0
+G_LOSS="w_mse"                # mse / w_mse
+G_SCALE=0.0                   # restoration guidance strength
+G_START=1001                  # guidance active when t < G_START
+G_STOP=-1                     # guidance active when t > G_STOP
+G_SPACE="latent"              # latent / rgb
+G_REPEAT=1                    # guidance updates per step
 
 # ---------- Custom model paths (optional) ----------
-TRAIN_CFG=""                  # e.g. configs/train/train.yaml
-CKPT=""                       # e.g. weights/custom.ckpt
+TRAIN_CFG=""
+CKPT=""
 
 # ==========================================
 # Build command
 # ==========================================
-
 CMD=(python inference.py)
 
 # Basic
@@ -109,6 +104,12 @@ CMD+=(--captioner "$CAPTIONER")
 CMD+=(--precision "$PRECISION")
 CMD+=(--seed "$SEED")
 CMD+=(--device "$DEVICE")
+
+# Optional input resize
+if [ "$AUTO_RESIZE" = true ]; then
+  CMD+=(--auto_resize_input)
+  CMD+=(--max_input_side "$MAX_INPUT_SIDE")
+fi
 
 # Optional booleans
 if [ "$RESCALE_CFG" = true ]; then
@@ -141,6 +142,10 @@ if [ "$GUIDANCE" = true ]; then
   CMD+=(--guidance)
   CMD+=(--g_loss "$G_LOSS")
   CMD+=(--g_scale "$G_SCALE")
+  CMD+=(--g_start "$G_START")
+  CMD+=(--g_stop "$G_STOP")
+  CMD+=(--g_space "$G_SPACE")
+  CMD+=(--g_repeat "$G_REPEAT")
 fi
 
 # Optional scalar/string params
@@ -185,6 +190,8 @@ echo "VERSION=$VERSION"
 echo "UPSCALE=$UPSCALE"
 echo "INPUT_DIR=$INPUT_DIR"
 echo "OUTPUT_DIR=$OUTPUT_DIR"
+echo "AUTO_RESIZE=$AUTO_RESIZE"
+echo "MAX_INPUT_SIDE=$MAX_INPUT_SIDE"
 echo "SAMPLER=$SAMPLER"
 echo "STEPS=$STEPS"
 echo "CFG_SCALE=$CFG_SCALE"
@@ -194,31 +201,13 @@ echo "CLEANER_TILED=$CLEANER_TILED"
 echo "CLDM_TILED=$CLDM_TILED"
 echo "VAE_ENCODER_TILED=$VAE_ENCODER_TILED"
 echo "VAE_DECODER_TILED=$VAE_DECODER_TILED"
-echo "EVAL_METRICS=$EVAL_METRICS"
-echo "GT_DIR=$GT_DIR"
-echo "RESIZE_PRED_TO_GT=$RESIZE_PRED_TO_GT"
+echo "GUIDANCE=$GUIDANCE"
+echo "G_LOSS=$G_LOSS"
+echo "G_SCALE=$G_SCALE"
+echo "G_START=$G_START"
+echo "G_STOP=$G_STOP"
+echo "G_SPACE=$G_SPACE"
+echo "G_REPEAT=$G_REPEAT"
 echo "=========================================="
 
 CUDA_VISIBLE_DEVICES="$GPU" "${CMD[@]}"
-
-if [ "$EVAL_METRICS" = true ]; then
-  EVAL_CMD=(
-    python eval_metrics.py
-    --pred_dir "$OUTPUT_DIR"
-    --gt_dir "$GT_DIR"
-    --save_csv "$OUTPUT_DIR/metrics.csv"
-  )
-
-  if [ "$RESIZE_PRED_TO_GT" = true ]; then
-    EVAL_CMD+=(--resize_pred_to_gt)
-  fi
-
-  echo "=========================================="
-  echo "Running metric evaluation..."
-  echo "PRED_DIR=$OUTPUT_DIR"
-  echo "GT_DIR=$GT_DIR"
-  echo "RESIZE_PRED_TO_GT=$RESIZE_PRED_TO_GT"
-  echo "=========================================="
-
-  "${EVAL_CMD[@]}"
-fi
