@@ -15,11 +15,11 @@ SEED=554
 # ---------- Task / version ----------
 TASK="sr"                     # sr / face / denoise / unaligned_face
 VERSION="v2.1"                # v1 / v2 / v2.1 / custom
-UPSCALE=2
+UPSCALE=1
 
 # ---------- Paths ----------
 INPUT_DIR="inputs/demo/mytest_face"
-OUTPUT_DIR="results/v21_bfr_scale2_test_eta0.1"
+OUTPUT_DIR="results/v21_bsr_test_RG_s=0"
 
 # ---------- Optional input resize ----------
 AUTO_RESIZE=false             # true / false
@@ -62,7 +62,7 @@ VAE_DECODER_TILE_SIZE=256
 
 # ---------- Optional noise / sampler extras ----------
 NOISE_AUG=0
-ETA=0.1
+ETA=0S
 ORDER=2
 STRENGTH=1.0
 S_CHURN=0
@@ -76,7 +76,7 @@ G_LOSS="w_mse"                # mse / w_mse
 G_SCALE=0.0                   # restoration guidance strength
 G_START=1001                  # guidance active when t < G_START
 G_STOP=-1                     # guidance active when t > G_STOP
-G_SPACE="latent"              # latent / rgb
+G_SPACE="rgb"              # latent / rgb
 G_REPEAT=1                    # guidance updates per step
 
 # ---------- Metric evaluation ----------
