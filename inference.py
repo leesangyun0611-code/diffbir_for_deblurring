@@ -81,7 +81,6 @@ def maybe_resize_input_to_small(input_path: str, max_side: int = 511):
             w, h = img.size
             out_file.parent.mkdir(parents=True, exist_ok=True)
 
-            # If already small enough, just copy-save as is
             if w <= max_side and h <= max_side:
                 img.save(out_file)
                 return False
@@ -90,7 +89,6 @@ def maybe_resize_input_to_small(input_path: str, max_side: int = 511):
             new_w = max(1, int(w * scale))
             new_h = max(1, int(h * scale))
 
-            # Safety clamp
             new_w = min(new_w, max_side)
             new_h = min(new_h, max_side)
 
@@ -100,7 +98,6 @@ def maybe_resize_input_to_small(input_path: str, max_side: int = 511):
             print(f"[AutoResize] {in_file.name}: {w}x{h} -> {new_w}x{new_h}")
             return True
 
-    # Single file input
     if src.is_file():
         if src.suffix.lower() not in valid_exts:
             return input_path, False
@@ -109,7 +106,6 @@ def maybe_resize_input_to_small(input_path: str, max_side: int = 511):
         resized = _save_processed(src, out_file)
         return (str(out_file) if resized else input_path), resized
 
-    # Directory input
     if src.is_dir():
         files = sorted(
             [p for p in src.iterdir() if p.is_file() and p.suffix.lower() in valid_exts]
@@ -135,6 +131,7 @@ def maybe_resize_input_to_small(input_path: str, max_side: int = 511):
 
 def parse_args() -> Namespace:
     parser = ArgumentParser()
+
     # model parameters
     parser.add_argument(
         "--task",
@@ -299,7 +296,7 @@ def parse_args() -> Namespace:
         "--s_tmax",
         type=float,
         default=300,
-        help="Maximum  sigma for adding ramdomness to sampling. Only works with some edm samplers.",
+        help="Maximum sigma for adding ramdomness to sampling. Only works with some edm samplers.",
     )
     parser.add_argument(
         "--s_noise",
@@ -342,7 +339,32 @@ def parse_args() -> Namespace:
         "--g_scale",
         type=float,
         default=0.0,
-        help="Learning rate of optimizing the guidance loss function.",
+        help="Guidance strength / step size for restoration guidance.",
+    )
+    parser.add_argument(
+        "--g_start",
+        type=int,
+        default=1001,
+        help="Apply guidance only when t < g_start.",
+    )
+    parser.add_argument(
+        "--g_stop",
+        type=int,
+        default=-1,
+        help="Apply guidance only when t > g_stop.",
+    )
+    parser.add_argument(
+        "--g_space",
+        type=str,
+        default="latent",
+        choices=["latent", "rgb"],
+        help="Space where restoration guidance loss is computed.",
+    )
+    parser.add_argument(
+        "--g_repeat",
+        type=int,
+        default=1,
+        help="Number of guidance updates per sampling step.",
     )
 
     # common parameters
@@ -359,6 +381,19 @@ def parse_args() -> Namespace:
         "--output", type=str, required=True, help="Path to save restored results."
     )
     parser.add_argument("--seed", type=int, default=231)
+
+    # optional auto resize
+    parser.add_argument(
+        "--auto_resize_input",
+        action="store_true",
+        help="Enable auto resize for large input images before inference.",
+    )
+    parser.add_argument(
+        "--max_input_side",
+        type=int,
+        default=511,
+        help="Maximum side length used when auto resizing input images.",
+    )
 
     # mps has not been tested
     parser.add_argument(
@@ -381,13 +416,17 @@ def parse_args() -> Namespace:
 def main():
     args = parse_args()
 
-    # Auto-resize only when input images are larger than 511 on either side.
-    # Aspect ratio is preserved, and already-small images are left untouched.
-    args.input, resized = maybe_resize_input_to_small(args.input, max_side=511)
-    if resized:
-        print(f"[AutoResize] Using resized input path: {args.input}")
+    if args.auto_resize_input:
+        args.input, resized = maybe_resize_input_to_small(
+            args.input,
+            max_side=args.max_input_side,
+        )
+        if resized:
+            print(f"[AutoResize] Using resized input path: {args.input}")
+        else:
+            print("[AutoResize] Input already small enough. No resize applied.")
     else:
-        print("[AutoResize] Input already small enough. No resize applied.")
+        print("[AutoResize] Disabled. Using original input path.")
 
     args.device = check_device(args.device)
     set_seed(args.seed)
