@@ -79,12 +79,17 @@ G_STOP=-1                     # guidance active when t > G_STOP
 G_SPACE="latent"              # latent / rgb
 G_REPEAT=1                    # guidance updates per step
 
+# ---------- Metric evaluation ----------
+EVAL_METRICS=true             # true / false
+GT_DIR="GT"                   # GT image directory (same filenames as outputs)
+RESIZE_PRED_TO_GT=false       # true / false
+
 # ---------- Custom model paths (optional) ----------
 TRAIN_CFG=""
 CKPT=""
 
 # ==========================================
-# Build command
+# Build inference command
 # ==========================================
 CMD=(python inference.py)
 
@@ -180,7 +185,7 @@ CMD+=(--s_tmax "$S_TMAX")
 CMD+=(--s_noise "$S_NOISE")
 
 # ==========================================
-# Run
+# Run inference
 # ==========================================
 echo "=========================================="
 echo "Running DiffBIR with the following config:"
@@ -208,6 +213,33 @@ echo "G_START=$G_START"
 echo "G_STOP=$G_STOP"
 echo "G_SPACE=$G_SPACE"
 echo "G_REPEAT=$G_REPEAT"
+echo "EVAL_METRICS=$EVAL_METRICS"
+echo "GT_DIR=$GT_DIR"
+echo "RESIZE_PRED_TO_GT=$RESIZE_PRED_TO_GT"
 echo "=========================================="
 
 CUDA_VISIBLE_DEVICES="$GPU" "${CMD[@]}"
+
+# ==========================================
+# Run metric evaluation
+# ==========================================
+if [ "$EVAL_METRICS" = true ]; then
+  EVAL_CMD=(
+    python eval_metrics.py
+    --pred_dir "$OUTPUT_DIR"
+    --gt_dir "$GT_DIR"
+  )
+
+  if [ "$RESIZE_PRED_TO_GT" = true ]; then
+    EVAL_CMD+=(--resize_pred_to_gt)
+  fi
+
+  echo "=========================================="
+  echo "Running metric evaluation..."
+  echo "PRED_DIR=$OUTPUT_DIR"
+  echo "GT_DIR=$GT_DIR"
+  echo "RESIZE_PRED_TO_GT=$RESIZE_PRED_TO_GT"
+  echo "=========================================="
+
+  "${EVAL_CMD[@]}"
+fi
