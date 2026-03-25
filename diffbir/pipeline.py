@@ -141,6 +141,7 @@ class Pipeline:
             )
 
         h1, w1 = cond["c_img"].shape[2:]
+        guidance_latent_target = cond["c_img"].detach().clone()
 
         if cldm_tiled and (h1 < cldm_tile_size // 8 or w1 < cldm_tile_size // 8):
             print("[Diffusion]: the input size is tiny and unnecessary to tile.")
@@ -180,6 +181,7 @@ class Pipeline:
 
         if self.cond_fn:
             self.cond_fn.load_target(cond_img * 2 - 1)
+            self.cond_fn.target_latent = guidance_latent_target
 
         control_scales = self.cldm.control_scales
         self.cldm.control_scales = [strength] * 13
@@ -211,7 +213,7 @@ class Pipeline:
             raise NotImplementedError(sampler_type)
 
         with VRAMPeakMonitor("sampling"):
-            z = sampler.sample(
+            sample_kwargs = dict(
                 model=self.cldm,
                 device=self.device,
                 steps=steps,
@@ -225,6 +227,15 @@ class Pipeline:
                 x_T=x_T,
                 progress=True,
             )
+
+            if sampler_type == "spaced":
+                sample_kwargs.update(
+                    cond_fn=self.cond_fn,
+                    guidance_decoder_tiled=vae_decoder_tiled,
+                    guidance_decoder_tile_size=vae_decoder_tile_size // 8,
+                )
+
+            z = sampler.sample(**sample_kwargs)
             z = z[..., :h1, :w1]
 
         if vae_decoder_tiled and (
