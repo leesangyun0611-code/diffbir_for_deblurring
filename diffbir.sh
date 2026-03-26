@@ -13,13 +13,13 @@ PRECISION="fp16"              # fp32 / fp16 / bf16
 SEED=45
 
 # ---------- Task / version ----------
-TASK="sr"                     # sr / face / denoise / unaligned_face
+TASK="denoise"                     # sr / face / denoise / unaligned_face
 VERSION="v2.1"                # v1 / v2 / v2.1 / custom
 UPSCALE=1
 
 # ---------- Paths ----------
 INPUT_DIR="inputs/demo/mytest"
-OUTPUT_DIR="results/v21_sr_spaced_scale1_RG_s=2.0_rgb"
+OUTPUT_DIR="results/v1_denoise_spaced_scale1_RG_s=2.0_latent_llava"
 
 # ---------- Optional input resize ----------
 AUTO_RESIZE=false             # true / false
@@ -40,10 +40,9 @@ N_SAMPLES=1
 BATCH_SIZE=1
 
 # ---------- Prompt / caption ----------
-CAPTIONER="none"              # none / llava / ram
-POS_PROMPT="sharp, detailed, high quality"
-NEG_PROMPT="blurry, low quality, artifacts"
-
+CAPTIONER="llava"              # none / llava / ram
+POS_PROMPT="realistic photo, natural color, clear structure, clean edges"
+NEG_PROMPT="motion blur, smear, ghosting, ringing, oversmoothed, artifacts, distorted details"
 # ---------- Tile toggles ----------
 CLEANER_TILED=false
 CLDM_TILED=false
@@ -71,16 +70,16 @@ S_TMAX=999
 S_NOISE=1.0
 
 # ---------- Guidance ----------
-GUIDANCE=true              # true / false
-G_LOSS="w_mse"                # mse / w_mse
-G_SCALE=2.0             # restoration guidance strength
+GUIDANCE=true          # true / false
+G_LOSS="mse"                # mse / w_mse
+G_SCALE=2.0      # restoration guidance strength
 G_START=1001                  # guidance active when t < G_START
 G_STOP=1                     # guidance active when t > G_STOP
-G_SPACE="rgb"              # latent / rgb
+G_SPACE="latent"              # latent / rgb
 G_REPEAT=1                    # guidance updates per step
 
 # ---------- Metric evaluation ----------
-EVAL_METRICS=true             # true / false
+EVAL_METRICS=true           # true / false
 GT_DIR="GT"                   # GT image directory (same filenames as outputs)
 RESIZE_PRED_TO_GT=false       # true / false
 
