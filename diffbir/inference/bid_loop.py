@@ -21,22 +21,25 @@ class BIDInferenceLoop(InferenceLoop):
         if self.args.version == "v1":
             config = "configs/inference/swinir.yaml"
             weight = MODELS["swinir_general"]
-        elif self.args.version == "v2":
+        elif self.args.version in ["v2", "v2.1"]:
             config = "configs/inference/scunet.yaml"
             weight = MODELS["scunet_psnr"]
         else:
-            config = "configs/inference/swinir.yaml"
-            weight = MODELS["swinir_realesrgan"]
+            raise ValueError(f"Unsupported version for BIDInferenceLoop: {self.args.version}")
+
         self.cleaner: SCUNet | SwinIR = instantiate_from_config(OmegaConf.load(config))
         model_weight = load_model_from_url(weight)
         self.cleaner.load_state_dict(model_weight, strict=True)
         self.cleaner.eval().to(self.args.device)
 
     def load_pipeline(self) -> None:
-        if self.args.version == "v1" or self.args.version == "v2.1":
+        if self.args.version == "v1":
             pipeline_class = SwinIRPipeline
-        else:
+        elif self.args.version in ["v2", "v2.1"]:
             pipeline_class = SCUNetPipeline
+        else:
+            raise ValueError(f"Unsupported version for BIDInferenceLoop: {self.args.version}")
+
         self.pipeline = pipeline_class(
             self.cleaner,
             self.cldm,
