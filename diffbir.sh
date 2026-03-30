@@ -19,7 +19,7 @@ UPSCALE=1
 
 # ---------- Paths ----------
 INPUT_DIR="inputs/demo/mytest"
-OUTPUT_DIR="results/v1_denoise_spaced_scale1_RG_s=2.0_latent_llava"
+OUTPUT_DIR="results/v21_tasks_denoise_spaced_RG_s=2.0_rgb_highfreq"
 
 # ---------- Optional input resize ----------
 AUTO_RESIZE=false             # true / false
@@ -40,9 +40,10 @@ N_SAMPLES=1
 BATCH_SIZE=1
 
 # ---------- Prompt / caption ----------
-CAPTIONER="llava"              # none / llava / ram
+CAPTIONER="none"              # none / llava / ram
 POS_PROMPT="realistic photo, natural color, clear structure, clean edges"
 NEG_PROMPT="motion blur, smear, ghosting, ringing, oversmoothed, artifacts, distorted details"
+
 # ---------- Tile toggles ----------
 CLEANER_TILED=false
 CLDM_TILED=false
@@ -70,16 +71,22 @@ S_TMAX=999
 S_NOISE=1.0
 
 # ---------- Guidance ----------
-GUIDANCE=true          # true / false
-G_LOSS="mse"                # mse / w_mse
-G_SCALE=2.0      # restoration guidance strength
+GUIDANCE=false                # true / false
+G_LOSS="w_mse"                  # mse / w_mse
+G_SCALE=2.0                   # restoration guidance strength
 G_START=1001                  # guidance active when t < G_START
-G_STOP=1                     # guidance active when t > G_STOP
-G_SPACE="latent"              # latent / rgb
+G_STOP=1                      # guidance active when t > G_STOP
+G_SPACE="rgb"              # latent / rgb
 G_REPEAT=1                    # guidance updates per step
 
+# ---------- Weighted guidance options (for G_LOSS=w_mse) ----------
+G_WEIGHT_MODE="highfreq"       # lowfreq / highfreq
+G_WEIGHT_FLOOR=0.0            # e.g. 0.0 / 0.1 / 0.2
+G_WEIGHT_GAMMA=1.0            # e.g. 1.0 / 2.0
+G_BLOCK_SIZE=2                # patch size for Sobel block aggregation
+
 # ---------- Metric evaluation ----------
-EVAL_METRICS=true           # true / false
+EVAL_METRICS=true             # true / false
 GT_DIR="GT"                   # GT image directory (same filenames as outputs)
 RESIZE_PRED_TO_GT=false       # true / false
 
@@ -150,6 +157,10 @@ if [ "$GUIDANCE" = true ]; then
   CMD+=(--g_stop "$G_STOP")
   CMD+=(--g_space "$G_SPACE")
   CMD+=(--g_repeat "$G_REPEAT")
+  CMD+=(--g_weight_mode "$G_WEIGHT_MODE")
+  CMD+=(--g_weight_floor "$G_WEIGHT_FLOOR")
+  CMD+=(--g_weight_gamma "$G_WEIGHT_GAMMA")
+  CMD+=(--g_block_size "$G_BLOCK_SIZE")
 fi
 
 # Optional scalar/string params
@@ -212,6 +223,10 @@ echo "G_START=$G_START"
 echo "G_STOP=$G_STOP"
 echo "G_SPACE=$G_SPACE"
 echo "G_REPEAT=$G_REPEAT"
+echo "G_WEIGHT_MODE=$G_WEIGHT_MODE"
+echo "G_WEIGHT_FLOOR=$G_WEIGHT_FLOOR"
+echo "G_WEIGHT_GAMMA=$G_WEIGHT_GAMMA"
+echo "G_BLOCK_SIZE=$G_BLOCK_SIZE"
 echo "EVAL_METRICS=$EVAL_METRICS"
 echo "GT_DIR=$GT_DIR"
 echo "RESIZE_PRED_TO_GT=$RESIZE_PRED_TO_GT"

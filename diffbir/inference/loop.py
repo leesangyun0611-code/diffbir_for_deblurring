@@ -98,19 +98,29 @@ class InferenceLoop:
         if not self.args.guidance:
             self.cond_fn = None
             return
+
         if self.args.g_loss == "mse":
-            cond_fn_cls = MSEGuidance
+            self.cond_fn = MSEGuidance(
+                self.args.g_scale,
+                self.args.g_start,
+                self.args.g_stop,
+                self.args.g_space,
+                self.args.g_repeat,
+            )
         elif self.args.g_loss == "w_mse":
-            cond_fn_cls = WeightedMSEGuidance
+            self.cond_fn = WeightedMSEGuidance(
+                self.args.g_scale,
+                self.args.g_start,
+                self.args.g_stop,
+                self.args.g_space,
+                self.args.g_repeat,
+                weight_mode=self.args.g_weight_mode,
+                weight_floor=self.args.g_weight_floor,
+                weight_gamma=self.args.g_weight_gamma,
+                block_size=self.args.g_block_size,
+            )
         else:
             raise ValueError(self.args.g_loss)
-        self.cond_fn = cond_fn_cls(
-            self.args.g_scale,
-            self.args.g_start,
-            self.args.g_stop,
-            self.args.g_space,
-            self.args.g_repeat,
-        )
 
     @overload
     def load_pipeline(self) -> None: ...

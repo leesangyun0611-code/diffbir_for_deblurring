@@ -366,6 +366,44 @@ def parse_args() -> Namespace:
         default=1,
         help="Number of guidance updates per sampling step.",
     )
+    parser.add_argument(
+        "--g_weight_mode",
+        type=str,
+        default="lowfreq",
+        choices=["lowfreq", "highfreq"],
+        help=(
+            "Weight-map mode for weighted MSE guidance. "
+            "'lowfreq' reproduces the original low-frequency-emphasis behavior, "
+            "while 'highfreq' emphasizes high-frequency regions."
+        ),
+    )
+    parser.add_argument(
+        "--g_weight_floor",
+        type=float,
+        default=0.0,
+        help=(
+            "Minimum floor value for the weighted guidance map. "
+            "Useful to avoid weights becoming too close to zero."
+        ),
+    )
+    parser.add_argument(
+        "--g_weight_gamma",
+        type=float,
+        default=1.0,
+        help=(
+            "Exponent applied to the weight map before floor scaling. "
+            "Values > 1 sharpen the contrast of the weighting."
+        ),
+    )
+    parser.add_argument(
+        "--g_block_size",
+        type=int,
+        default=2,
+        help=(
+            "Patch size used for patch-level Sobel gradient aggregation "
+            "in weighted MSE guidance."
+        ),
+    )
 
     # common parameters
     parser.add_argument(
