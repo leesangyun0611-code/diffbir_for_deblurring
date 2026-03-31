@@ -13,13 +13,13 @@ PRECISION="fp16"              # fp32 / fp16 / bf16
 SEED=45
 
 # ---------- Task / version ----------
-TASK="denoise"                     # sr / face / denoise / unaligned_face
+TASK="denoise"                # sr / face / denoise / unaligned_face
 VERSION="v2.1"                # v1 / v2 / v2.1 / custom
 UPSCALE=1
 
 # ---------- Paths ----------
 INPUT_DIR="inputs/demo/mytest"
-OUTPUT_DIR="results/v21_tasks_denoise_spaced_RG_s=2.0_rgb_highfreq"
+OUTPUT_DIR="results/v21_denoise_spaced_scale1_RG_s=2.0_latent"
 
 # ---------- Optional input resize ----------
 AUTO_RESIZE=false             # true / false
@@ -71,23 +71,28 @@ S_TMAX=999
 S_NOISE=1.0
 
 # ---------- Guidance ----------
-GUIDANCE=false                # true / false
-G_LOSS="w_mse"                  # mse / w_mse
-G_SCALE=2.0                   # restoration guidance strength
-G_START=1001                  # guidance active when t < G_START
-G_STOP=1                      # guidance active when t > G_STOP
-G_SPACE="rgb"              # latent / rgb
-G_REPEAT=1                    # guidance updates per step
+GUIDANCE=true                # true / false
+G_LOSS="mse"                # mse / w_mse
+G_SCALE=2.0
+G_START=1001
+G_STOP=1
+G_SPACE="latent"                 # latent / rgb
+G_REPEAT=1
 
 # ---------- Weighted guidance options (for G_LOSS=w_mse) ----------
-G_WEIGHT_MODE="highfreq"       # lowfreq / highfreq
-G_WEIGHT_FLOOR=0.0            # e.g. 0.0 / 0.1 / 0.2
-G_WEIGHT_GAMMA=1.0            # e.g. 1.0 / 2.0
-G_BLOCK_SIZE=2                # patch size for Sobel block aggregation
+G_WEIGHT_MODE="lowfreq"      # lowfreq / highfreq
+G_WEIGHT_FLOOR=0.0
+G_WEIGHT_GAMMA=1.0
+G_BLOCK_SIZE=2
 
-# ---------- Metric evaluation ----------
+# ---------- MANIQA evaluation ----------
+EVAL_MANIQA=true              # true / false
+MANIQA_MODEL="maniqa-pipal"   # maniqa / maniqa-kadid / maniqa-pipal
+IQA_CSV="iqa_results.csv"
+
+# ---------- GT-based metric evaluation ----------
 EVAL_METRICS=true             # true / false
-GT_DIR="GT"                   # GT image directory (same filenames as outputs)
+GT_DIR="GT"
 RESIZE_PRED_TO_GT=false       # true / false
 
 # ---------- Custom model paths (optional) ----------
@@ -163,6 +168,13 @@ if [ "$GUIDANCE" = true ]; then
   CMD+=(--g_block_size "$G_BLOCK_SIZE")
 fi
 
+# MANIQA
+if [ "$EVAL_MANIQA" = true ]; then
+  CMD+=(--eval_maniqa)
+  CMD+=(--maniqa_model "$MANIQA_MODEL")
+  CMD+=(--iqa_csv "$IQA_CSV")
+fi
+
 # Optional scalar/string params
 if [ -n "$START_POINT_NOISE_SCALE" ]; then
   CMD+=(--start_point_noise_scale "$START_POINT_NOISE_SCALE")
@@ -227,6 +239,9 @@ echo "G_WEIGHT_MODE=$G_WEIGHT_MODE"
 echo "G_WEIGHT_FLOOR=$G_WEIGHT_FLOOR"
 echo "G_WEIGHT_GAMMA=$G_WEIGHT_GAMMA"
 echo "G_BLOCK_SIZE=$G_BLOCK_SIZE"
+echo "EVAL_MANIQA=$EVAL_MANIQA"
+echo "MANIQA_MODEL=$MANIQA_MODEL"
+echo "IQA_CSV=$IQA_CSV"
 echo "EVAL_METRICS=$EVAL_METRICS"
 echo "GT_DIR=$GT_DIR"
 echo "RESIZE_PRED_TO_GT=$RESIZE_PRED_TO_GT"
@@ -235,7 +250,7 @@ echo "=========================================="
 CUDA_VISIBLE_DEVICES="$GPU" "${CMD[@]}"
 
 # ==========================================
-# Run metric evaluation
+# Run GT-based metric evaluation
 # ==========================================
 if [ "$EVAL_METRICS" = true ]; then
   EVAL_CMD=(
@@ -256,4 +271,36 @@ if [ "$EVAL_METRICS" = true ]; then
   echo "=========================================="
 
   "${EVAL_CMD[@]}"
+fi
+
+# ==========================================
+# Print MANIQA summary
+# ==========================================
+if [ "$EVAL_MANIQA" = true ]; then
+  IQA_PATH="$OUTPUT_DIR/$IQA_CSV"
+
+  if [ -f "$IQA_PATH" ]; then
+    echo "=========================================="
+    echo "MANIQA summary"
+    echo "IQA_PATH=$IQA_PATH"
+    echo "=========================================="
+
+    python - <<PY
+import pandas as pd
+
+csv_path = r"$IQA_PATH"
+df = pd.read_csv(csv_path)
+
+if "maniqa" not in df.columns:
+    raise ValueError(f"'maniqa' column not found in {csv_path}")
+
+for _, row in df.iterrows():
+    print(f"{row['file_name']}: MANIQA={row['maniqa']:.6f}")
+
+print("============================================================")
+print(f"Average MANIQA: {df['maniqa'].mean():.6f}")
+PY
+  else
+    echo "[WARN] MANIQA CSV not found: $IQA_PATH"
+  fi
 fi

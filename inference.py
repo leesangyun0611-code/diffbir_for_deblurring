@@ -1,5 +1,6 @@
 from argparse import ArgumentParser, Namespace
 from pathlib import Path
+import importlib.util
 
 import torch
 from PIL import Image
@@ -39,6 +40,18 @@ def check_device(device: str) -> str:
                     device = "cpu"
     print(f"using device {device}")
     return device
+
+
+def check_pyiqa_available() -> None:
+    """
+    Ensure pyiqa is installed when IQA evaluation is requested.
+    """
+    if importlib.util.find_spec("pyiqa") is None:
+        raise ImportError(
+            "MANIQA evaluation requires 'pyiqa', but it is not installed.\n"
+            "Install it with:\n"
+            "  pip install pyiqa"
+        )
 
 
 DEFAULT_POS_PROMPT = (
@@ -433,6 +446,26 @@ def parse_args() -> Namespace:
         help="Maximum side length used when auto resizing input images.",
     )
 
+    # IQA / MANIQA parameters
+    parser.add_argument(
+        "--eval_maniqa",
+        action="store_true",
+        help="Evaluate final restored outputs with MANIQA after inference.",
+    )
+    parser.add_argument(
+        "--maniqa_model",
+        type=str,
+        default="maniqa-pipal",
+        choices=["maniqa", "maniqa-kadid", "maniqa-pipal"],
+        help="MANIQA variant used by pyiqa.",
+    )
+    parser.add_argument(
+        "--iqa_csv",
+        type=str,
+        default="iqa_results.csv",
+        help="CSV filename used to save IQA results inside the output directory.",
+    )
+
     # mps has not been tested
     parser.add_argument(
         "--device", type=str, default="cuda", choices=["cpu", "cuda", "mps"]
@@ -468,6 +501,13 @@ def main():
 
     args.device = check_device(args.device)
     set_seed(args.seed)
+
+    if args.eval_maniqa:
+        check_pyiqa_available()
+        if not args.iqa_csv.lower().endswith(".csv"):
+            raise ValueError("--iqa_csv must end with '.csv'")
+        print(f"[IQA] MANIQA evaluation enabled: {args.maniqa_model}")
+        print(f"[IQA] Result CSV will be saved as: {args.iqa_csv}")
 
     if args.version != "custom":
         loops = {

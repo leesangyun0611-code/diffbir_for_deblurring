@@ -1,6 +1,7 @@
 import os
 from typing import overload, Generator, List
 from argparse import Namespace
+
 import numpy as np
 import torch
 from PIL import Image
@@ -32,6 +33,8 @@ class InferenceLoop:
         self.args = args
         self.loop_ctx = {}
         self.pipeline: Pipeline = None
+        self.maniqa_metric = None
+
         with VRAMPeakMonitor("loading cleaner model"):
             self.load_cleaner()
         with VRAMPeakMonitor("loading cldm model"):
@@ -60,6 +63,7 @@ class InferenceLoop:
             f"load pretrained stable diffusion, "
             f"unused weights: {unused}, missing weights: {missing}"
         )
+
         # load controlnet weight
         if self.args.version == "v1":
             if self.args.task == "face":
@@ -76,9 +80,11 @@ class InferenceLoop:
         else:
             # v2.1
             control_weight = load_model_from_url(MODELS["v2.1"])
+
         self.cldm.load_controlnet_from_ckpt(control_weight)
-        print(f"load controlnet weight")
+        print("load controlnet weight")
         self.cldm.eval().to(self.args.device)
+
         cast_type = {
             "fp32": torch.float32,
             "fp16": torch.float16,
@@ -137,18 +143,65 @@ class InferenceLoop:
         else:
             raise ValueError(f"unsupported captioner: {self.args.captioner}")
 
+    def _init_iqa_metric(self) -> None:
+        if not getattr(self.args, "eval_maniqa", False):
+            self.maniqa_metric = None
+            return
+
+        import pyiqa
+
+        self.maniqa_metric = pyiqa.create_metric(
+            self.args.maniqa_model,
+            device=self.args.device,
+        )
+        print(f"[IQA] Loaded MANIQA metric: {self.args.maniqa_model}")
+
+    def _score_maniqa(self, sample: np.ndarray) -> float:
+        if self.maniqa_metric is None:
+            raise RuntimeError("MANIQA metric is not initialized.")
+
+        x = (
+            torch.from_numpy(sample)
+            .permute(2, 0, 1)
+            .unsqueeze(0)
+            .float()
+            .div(255.0)
+            .to(self.args.device)
+        )
+
+        with torch.no_grad():
+            score = self.maniqa_metric(x)
+
+        if isinstance(score, torch.Tensor):
+            score = score.detach().float().mean().item()
+
+        return float(score)
+
     def setup(self) -> None:
         self.save_dir = self.args.output
         os.makedirs(self.save_dir, exist_ok=True)
+
+        # reset per-run csvs to avoid duplicate rows when reusing OUTPUT_DIR
+        prompt_csv_path = os.path.join(self.save_dir, "prompt.csv")
+        if os.path.exists(prompt_csv_path):
+            os.remove(prompt_csv_path)
+
+        if getattr(self.args, "eval_maniqa", False):
+            iqa_csv_path = os.path.join(self.save_dir, self.args.iqa_csv)
+            if os.path.exists(iqa_csv_path):
+                os.remove(iqa_csv_path)
+
+        self._init_iqa_metric()
 
     def load_lq(self) -> Generator[Image.Image, None, None]:
         img_exts = [".png", ".jpg", ".jpeg"]
         assert os.path.isdir(
             self.args.input
         ), "Please put your low-quality images in a folder."
+
         for file_name in sorted(os.listdir(self.args.input)):
             stem, ext = os.path.splitext(file_name)
-            if ext not in img_exts:
+            if ext.lower() not in img_exts:
                 print(f"{file_name} is not an image, continue")
                 continue
             file_path = os.path.join(self.args.input, file_name)
@@ -184,6 +237,7 @@ class InferenceLoop:
             batch_size = self.args.batch_size
             num_batches = (n_samples + batch_size - 1) // batch_size
             samples = []
+
             for i in range(num_batches):
                 n_inputs = min((i + 1) * batch_size, n_samples) - i * batch_size
                 with torch.autocast(self.args.device, auto_cast_type):
@@ -216,11 +270,16 @@ class InferenceLoop:
                         self.args.order,
                     )
                 samples.extend(list(batch_samples))
+
             self.save(samples, pos_prompt, neg_prompt)
 
     def save(self, samples: List[np.ndarray], pos_prompt: str, neg_prompt: str) -> None:
         file_stem = self.loop_ctx["file_stem"]
         assert len(samples) == self.args.n_samples
+
+        prompt_rows = []
+        iqa_rows = []
+
         for i, sample in enumerate(samples):
             file_name = (
                 f"{file_stem}_{i}.png"
@@ -228,17 +287,46 @@ class InferenceLoop:
                 else f"{file_stem}.png"
             )
             save_path = os.path.join(self.save_dir, file_name)
+
             Image.fromarray(sample).save(save_path)
             print(f"save result to {save_path}")
-        csv_path = os.path.join(self.save_dir, "prompt.csv")
-        df = pd.DataFrame(
-            {
-                "file_name": [file_stem],
-                "pos_prompt": [pos_prompt],
-                "neg_prompt": [neg_prompt],
-            }
-        )
-        if os.path.exists(csv_path):
-            df.to_csv(csv_path, index=None, mode="a", header=None)
+
+            prompt_rows.append(
+                {
+                    "file_name": file_name,
+                    "pos_prompt": pos_prompt,
+                    "neg_prompt": neg_prompt,
+                }
+            )
+
+            if self.maniqa_metric is not None:
+                maniqa_score = self._score_maniqa(sample)
+                iqa_rows.append(
+                    {
+                        "file_name": file_name,
+                        "maniqa": maniqa_score,
+                    }
+                )
+                print(f"[IQA] {file_name}: MANIQA={maniqa_score:.6f}")
+
+        # save prompt metadata
+        prompt_csv_path = os.path.join(self.save_dir, "prompt.csv")
+        prompt_df = pd.DataFrame(prompt_rows)
+        if os.path.exists(prompt_csv_path):
+            prompt_df.to_csv(prompt_csv_path, index=None, mode="a", header=None)
         else:
-            df.to_csv(csv_path, index=None)
+            prompt_df.to_csv(prompt_csv_path, index=None)
+
+        # save IQA scores separately
+        if iqa_rows:
+            iqa_csv_path = os.path.join(self.save_dir, self.args.iqa_csv)
+            iqa_df = pd.DataFrame(iqa_rows)
+            if os.path.exists(iqa_csv_path):
+                iqa_df.to_csv(iqa_csv_path, index=None, mode="a", header=None)
+            else:
+                iqa_df.to_csv(iqa_csv_path, index=None)
+
+            avg_maniqa = iqa_df["maniqa"].mean()
+            print("============================================================")
+            print(f"Average MANIQA (current image batch): {avg_maniqa:.6f}")
+            print("============================================================")
