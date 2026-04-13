@@ -227,6 +227,40 @@ def parse_args() -> Namespace:
     parser.add_argument(
         "--cleaner_tile_stride", type=int, default=256, help="Stride between tiles."
     )
+
+    # Restormer stage-1 cleaner options
+    parser.add_argument(
+        "--cleaner_type",
+        type=str,
+        default="default",
+        choices=["default", "restormer"],
+        help="Override stage-1 cleaner. Use 'restormer' to replace the default DiffBIR cleaner.",
+    )
+    parser.add_argument(
+        "--restormer_repo",
+        type=str,
+        default="third_party/Restormer",
+        help="Path to cloned Restormer repository.",
+    )
+    parser.add_argument(
+        "--restormer_task",
+        type=str,
+        default="Motion_Deblurring",
+        choices=[
+            "Motion_Deblurring",
+            "Real_Denoising",
+            "Gaussian_Color_Denoising",
+            "Gaussian_Gray_Denoising",
+        ],
+        help="Restormer pretrained task type.",
+    )
+    parser.add_argument(
+        "--restormer_ckpt",
+        type=str,
+        default="",
+        help="Path to local Restormer checkpoint.",
+    )
+
     parser.add_argument(
         "--vae_encoder_tiled",
         action="store_true",
@@ -460,6 +494,24 @@ def parse_args() -> Namespace:
         help="MANIQA variant used by pyiqa.",
     )
     parser.add_argument(
+        "--eval_lpips",
+        action="store_true",
+        help="Evaluate final restored outputs with LPIPS after inference.",
+    )
+    parser.add_argument(
+        "--lpips_model",
+        type=str,
+        default="alex",
+        choices=["alex", "vgg"],
+        help="LPIPS network architecture.",
+    )
+    parser.add_argument(
+        "--gt_dir",
+        type=str,
+        default="",
+        help="Directory with GT images for LPIPS evaluation (same file names as input).",
+    )
+    parser.add_argument(
         "--iqa_csv",
         type=str,
         default="iqa_results.csv",
@@ -507,6 +559,18 @@ def main():
         if not args.iqa_csv.lower().endswith(".csv"):
             raise ValueError("--iqa_csv must end with '.csv'")
         print(f"[IQA] MANIQA evaluation enabled: {args.maniqa_model}")
+        print(f"[IQA] Result CSV will be saved as: {args.iqa_csv}")
+
+    if args.eval_lpips:
+        try:
+            import lpips
+        except ImportError:
+            raise ImportError(
+                "LPIPS evaluation requires 'lpips', but it is not installed.\n"
+                "Install it with:\n"
+                "  pip install lpips"
+            )
+        print(f"[IQA] LPIPS evaluation enabled: {args.lpips_model}")
         print(f"[IQA] Result CSV will be saved as: {args.iqa_csv}")
 
     if args.version != "custom":

@@ -34,6 +34,7 @@ class InferenceLoop:
         self.loop_ctx = {}
         self.pipeline: Pipeline = None
         self.maniqa_metric = None
+        self.lpips_metric = None
 
         with VRAMPeakMonitor("loading cleaner model"):
             self.load_cleaner()
@@ -146,15 +147,20 @@ class InferenceLoop:
     def _init_iqa_metric(self) -> None:
         if not getattr(self.args, "eval_maniqa", False):
             self.maniqa_metric = None
-            return
+        else:
+            import pyiqa
+            self.maniqa_metric = pyiqa.create_metric(
+                self.args.maniqa_model,
+                device=self.args.device,
+            )
+            print(f"[IQA] Loaded MANIQA metric: {self.args.maniqa_model}")
 
-        import pyiqa
-
-        self.maniqa_metric = pyiqa.create_metric(
-            self.args.maniqa_model,
-            device=self.args.device,
-        )
-        print(f"[IQA] Loaded MANIQA metric: {self.args.maniqa_model}")
+        if not getattr(self.args, "eval_lpips", False):
+            self.lpips_metric = None
+        else:
+            import lpips
+            self.lpips_metric = lpips.LPIPS(net=self.args.lpips_model).to(self.args.device)
+            print(f"[IQA] Loaded LPIPS metric: {self.args.lpips_model}")
 
     def _score_maniqa(self, sample: np.ndarray) -> float:
         if self.maniqa_metric is None:
@@ -176,6 +182,33 @@ class InferenceLoop:
             score = score.detach().float().mean().item()
 
         return float(score)
+
+    def _score_lpips(self, sample: np.ndarray, gt: np.ndarray) -> float:
+        if self.lpips_metric is None:
+            raise RuntimeError("LPIPS metric is not initialized.")
+
+        # Convert to torch tensors and normalize to [-1, 1] as expected by LPIPS
+        sample_tensor = (
+            torch.from_numpy(sample)
+            .permute(2, 0, 1)
+            .unsqueeze(0)
+            .float()
+            .div(127.5)
+            .sub(1.0)
+            .to(self.args.device)
+        )
+        gt_tensor = (
+            torch.from_numpy(gt)
+            .permute(2, 0, 1)
+            .unsqueeze(0)
+            .float()
+            .div(127.5)
+            .sub(1.0)
+            .to(self.args.device)
+        )
+        with torch.no_grad():
+            score = self.lpips_metric(sample_tensor, gt_tensor)
+        return float(score.item())
 
     def setup(self) -> None:
         self.save_dir = self.args.output
@@ -309,6 +342,27 @@ class InferenceLoop:
                 )
                 print(f"[IQA] {file_name}: MANIQA={maniqa_score:.6f}")
 
+            if self.lpips_metric is not None:
+                # Load GT image for LPIPS comparison
+                gt_path = os.path.join(self.args.gt_dir, file_name)
+                if os.path.exists(gt_path):
+                    gt_img = np.array(Image.open(gt_path).convert("RGB"))
+                    if gt_img.shape[:2] != sample.shape[:2]:
+                        gt_img = np.array(Image.fromarray(gt_img).resize((sample.shape[1], sample.shape[0]), Image.BICUBIC))
+                    lpips_score = self._score_lpips(sample, gt_img)
+                    if iqa_rows and len(iqa_rows) > i:
+                        iqa_rows[i]["lpips"] = lpips_score
+                    else:
+                        iqa_rows.append(
+                            {
+                                "file_name": file_name,
+                                "lpips": lpips_score,
+                            }
+                        )
+                    print(f"[IQA] {file_name}: LPIPS={lpips_score:.6f}")
+                else:
+                    print(f"[IQA] Warning: GT image not found for {file_name}, skipping LPIPS")
+
         # save prompt metadata
         prompt_csv_path = os.path.join(self.save_dir, "prompt.csv")
         prompt_df = pd.DataFrame(prompt_rows)
@@ -329,4 +383,8 @@ class InferenceLoop:
             avg_maniqa = iqa_df["maniqa"].mean()
             print("============================================================")
             print(f"Average MANIQA (current image batch): {avg_maniqa:.6f}")
+
+            if "lpips" in iqa_df.columns:
+                avg_lpips = iqa_df["lpips"].mean()
+                print(f"Average LPIPS (current image batch): {avg_lpips:.6f}")
             print("============================================================")

@@ -458,3 +458,71 @@ class SCUNetPipeline(Pipeline):
         if min(output.shape[2:]) < 512:
             output = resize_short_edge_to(output, size=512)
         return output
+
+
+class RestormerPipeline(Pipeline):
+
+    @staticmethod
+    def _pad_reflect_to_multiple(
+        x: torch.Tensor, multiple: int = 8
+    ) -> tuple[torch.Tensor, int, int]:
+        _, _, h, w = x.size()
+        ph = (multiple - h % multiple) % multiple
+        pw = (multiple - w % multiple) % multiple
+        if ph == 0 and pw == 0:
+            return x, h, w
+        x = F.pad(x, (0, pw, 0, ph), mode="reflect")
+        return x, h, w
+
+    def _run_tiled(
+        self, x: torch.Tensor, tile_size: int, tile_stride: int
+    ) -> torch.Tensor:
+        b, c, h, w = x.shape
+        tile = min(tile_size, h, w)
+
+        if tile % 8 != 0:
+            raise ValueError("Restormer cleaner tile size must be a multiple of 8")
+        if tile_stride <= 0:
+            raise ValueError("Restormer cleaner tile stride must be positive")
+        if tile_stride > tile:
+            raise ValueError("Restormer cleaner tile stride must be <= tile size")
+
+        h_idx_list = list(range(0, max(h - tile, 0), tile_stride)) + [h - tile]
+        w_idx_list = list(range(0, max(w - tile, 0), tile_stride)) + [w - tile]
+
+        E = torch.zeros((b, c, h, w), device=x.device, dtype=x.dtype)
+        W = torch.zeros_like(E)
+
+        for h_idx in h_idx_list:
+            for w_idx in w_idx_list:
+                in_patch = x[..., h_idx:h_idx + tile, w_idx:w_idx + tile]
+                out_patch = self.cleaner(in_patch)
+                out_patch_mask = torch.ones_like(out_patch)
+                E[..., h_idx:h_idx + tile, w_idx:w_idx + tile].add_(out_patch)
+                W[..., h_idx:h_idx + tile, w_idx:w_idx + tile].add_(out_patch_mask)
+
+        return E.div_(W.clamp_min(1e-8))
+
+    def apply_cleaner(
+        self, lq: torch.Tensor, tiled: bool, tile_size: int, tile_stride: int
+    ) -> torch.Tensor:
+        if min(lq.shape[2:]) < 512:
+            lq = resize_short_edge_to(lq, size=512)
+
+        if tiled and (lq.size(2) < tile_size or lq.size(3) < tile_size):
+            print("[Restormer]: input is smaller than tile size, disable cleaner tiling.")
+            tiled = False
+
+        lq, h0, w0 = self._pad_reflect_to_multiple(lq, multiple=8)
+
+        if not tiled:
+            output = self.cleaner(lq)
+        else:
+            output = self._run_tiled(lq, tile_size, tile_stride)
+
+        output = output[:, :, :h0, :w0]
+
+        if min(output.shape[2:]) < 512:
+            output = resize_short_edge_to(output, size=512)
+
+        return output

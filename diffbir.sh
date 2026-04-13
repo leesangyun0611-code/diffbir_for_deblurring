@@ -1,25 +1,36 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -eo pipefail
 
 # ==========================================
-# DiffBIR experiment launcher
+# DiffBIR single experiment launcher
 # Run with: bash diffbir.sh
 # ==========================================
 
 # ---------- Device ----------
-GPU=1
+GPU=0
 DEVICE="cuda"                 # cpu / cuda / mps
 PRECISION="fp16"              # fp32 / fp16 / bf16
-SEED=45
+SEED=42
+
+# ---------- Current experiment ----------
+EXPERIMENT_NAME="exp1_4_wmse_rgb_highfreq_s1.5_gamma0.5_denoise"
+TASK="denoise"                # sr / face / denoise / unaligned_face
+GUIDANCE=true                 # true / false
+G_LOSS="w_mse"                # mse / w_mse
+G_SCALE=1.5
+G_SPACE="rgb"                 # latent / rgb
+G_WEIGHT_MODE="highfreq"      # lowfreq / highfreq
+G_WEIGHT_GAMMA=0.5
 
 # ---------- Task / version ----------
-TASK="denoise"                # sr / face / denoise / unaligned_face
 VERSION="v2.1"                # v1 / v2 / v2.1 / custom
 UPSCALE=1
 
 # ---------- Paths ----------
-INPUT_DIR="inputs/demo/mytest"
-OUTPUT_DIR="results/v21_denoise_spaced_scale1_RG_s=2.0_latent"
+INPUT_DIR="inputs/demo/input_test"
+GT_DIR="GT"
+RESULTS_ROOT="results"
+OUTPUT_DIR="${RESULTS_ROOT}/${EXPERIMENT_NAME}"
 
 # ---------- Optional input resize ----------
 AUTO_RESIZE=false             # true / false
@@ -27,7 +38,7 @@ MAX_INPUT_SIDE=511            # only used when AUTO_RESIZE=true
 
 # ---------- Sampling ----------
 SAMPLER="spaced"              # spaced / ddim / dpm++_m2 / edm_euler / ...
-STEPS=50
+STEPS=40
 CFG_SCALE=4
 RESCALE_CFG=false             # true / false
 
@@ -41,8 +52,8 @@ BATCH_SIZE=1
 
 # ---------- Prompt / caption ----------
 CAPTIONER="none"              # none / llava / ram
-POS_PROMPT="realistic photo, natural color, clear structure, clean edges"
-NEG_PROMPT="motion blur, smear, ghosting, ringing, oversmoothed, artifacts, distorted details"
+POS_PROMPT="a sharp, clean, natural photo, no motion blur, high detail"
+NEG_PROMPT="motion blur, blurry, ghosting, smear, low quality, artifacts"
 
 # ---------- Tile toggles ----------
 CLEANER_TILED=false
@@ -60,6 +71,13 @@ CLDM_TILE_STRIDE=128
 VAE_ENCODER_TILE_SIZE=1024
 VAE_DECODER_TILE_SIZE=256
 
+# ---------- Restormer stage-1 cleaner ----------
+# Roll back to the original stage-1 path at any time with: CLEANER_TYPE="default"
+CLEANER_TYPE="default"      # default / restormer
+RESTORMER_REPO="third_party/Restormer"
+RESTORMER_TASK="Motion_Deblurring"
+RESTORMER_CKPT="${RESTORMER_REPO}/Motion_Deblurring/pretrained_models/motion_deblurring.pth"
+
 # ---------- Optional noise / sampler extras ----------
 NOISE_AUG=0
 ETA=0
@@ -70,30 +88,26 @@ S_TMIN=0
 S_TMAX=999
 S_NOISE=1.0
 
-# ---------- Guidance ----------
-GUIDANCE=true                # true / false
-G_LOSS="mse"                # mse / w_mse
-G_SCALE=2.0
+# ---------- Guidance shared options ----------
 G_START=1001
 G_STOP=1
-G_SPACE="latent"                 # latent / rgb
 G_REPEAT=1
-
-# ---------- Weighted guidance options (for G_LOSS=w_mse) ----------
-G_WEIGHT_MODE="lowfreq"      # lowfreq / highfreq
 G_WEIGHT_FLOOR=0.0
-G_WEIGHT_GAMMA=1.0
 G_BLOCK_SIZE=2
 
 # ---------- MANIQA evaluation ----------
-EVAL_MANIQA=true              # true / false
-MANIQA_MODEL="maniqa-pipal"   # maniqa / maniqa-kadid / maniqa-pipal
+EVAL_MANIQA=true             # true / false
+MANIQA_MODEL="maniqa-pipal"  # maniqa / maniqa-kadid / maniqa-pipal
 IQA_CSV="iqa_results.csv"
 
+# ---------- LPIPS evaluation ----------
+EVAL_LPIPS=true              # true / false
+LPIPS_MODEL="alex"           # alex / vgg
+
 # ---------- GT-based metric evaluation ----------
-EVAL_METRICS=true             # true / false
-GT_DIR="GT"
-RESIZE_PRED_TO_GT=false       # true / false
+EVAL_METRICS=true            # true / false
+RESIZE_PRED_TO_GT=false      # true / false
+METRICS_CSV="metrics_psnr_ssim.csv"
 
 # ---------- Custom model paths (optional) ----------
 TRAIN_CFG=""
@@ -110,6 +124,9 @@ CMD+=(--version "$VERSION")
 CMD+=(--upscale "$UPSCALE")
 CMD+=(--input "$INPUT_DIR")
 CMD+=(--output "$OUTPUT_DIR")
+if [ "$EVAL_LPIPS" = true ] && [ -n "$GT_DIR" ]; then
+  CMD+=(--gt_dir "$GT_DIR")
+fi
 CMD+=(--n_samples "$N_SAMPLES")
 CMD+=(--batch_size "$BATCH_SIZE")
 CMD+=(--sampler "$SAMPLER")
@@ -120,6 +137,14 @@ CMD+=(--captioner "$CAPTIONER")
 CMD+=(--precision "$PRECISION")
 CMD+=(--seed "$SEED")
 CMD+=(--device "$DEVICE")
+
+# Stage-1 cleaner selection
+CMD+=(--cleaner_type "$CLEANER_TYPE")
+if [ "$CLEANER_TYPE" = "restormer" ]; then
+  CMD+=(--restormer_repo "$RESTORMER_REPO")
+  CMD+=(--restormer_task "$RESTORMER_TASK")
+  CMD+=(--restormer_ckpt "$RESTORMER_CKPT")
+fi
 
 # Optional input resize
 if [ "$AUTO_RESIZE" = true ]; then
@@ -172,6 +197,16 @@ fi
 if [ "$EVAL_MANIQA" = true ]; then
   CMD+=(--eval_maniqa)
   CMD+=(--maniqa_model "$MANIQA_MODEL")
+fi
+
+# LPIPS
+if [ "$EVAL_LPIPS" = true ]; then
+  CMD+=(--eval_lpips)
+  CMD+=(--lpips_model "$LPIPS_MODEL")
+fi
+
+# IQA CSV (if any IQA evaluation is enabled)
+if [ "$EVAL_MANIQA" = true ] || [ "$EVAL_LPIPS" = true ]; then
   CMD+=(--iqa_csv "$IQA_CSV")
 fi
 
@@ -211,11 +246,13 @@ CMD+=(--s_noise "$S_NOISE")
 # ==========================================
 echo "=========================================="
 echo "Running DiffBIR with the following config:"
+echo "EXPERIMENT_NAME=$EXPERIMENT_NAME"
 echo "GPU=$GPU"
 echo "TASK=$TASK"
 echo "VERSION=$VERSION"
 echo "UPSCALE=$UPSCALE"
 echo "INPUT_DIR=$INPUT_DIR"
+echo "GT_DIR=$GT_DIR"
 echo "OUTPUT_DIR=$OUTPUT_DIR"
 echo "AUTO_RESIZE=$AUTO_RESIZE"
 echo "MAX_INPUT_SIDE=$MAX_INPUT_SIDE"
@@ -224,6 +261,10 @@ echo "STEPS=$STEPS"
 echo "CFG_SCALE=$CFG_SCALE"
 echo "START_POINT_TYPE=$START_POINT_TYPE"
 echo "PRECISION=$PRECISION"
+echo "CLEANER_TYPE=$CLEANER_TYPE"
+echo "RESTORMER_REPO=$RESTORMER_REPO"
+echo "RESTORMER_TASK=$RESTORMER_TASK"
+echo "RESTORMER_CKPT=$RESTORMER_CKPT"
 echo "CLEANER_TILED=$CLEANER_TILED"
 echo "CLDM_TILED=$CLDM_TILED"
 echo "VAE_ENCODER_TILED=$VAE_ENCODER_TILED"
@@ -241,10 +282,12 @@ echo "G_WEIGHT_GAMMA=$G_WEIGHT_GAMMA"
 echo "G_BLOCK_SIZE=$G_BLOCK_SIZE"
 echo "EVAL_MANIQA=$EVAL_MANIQA"
 echo "MANIQA_MODEL=$MANIQA_MODEL"
+echo "EVAL_LPIPS=$EVAL_LPIPS"
+echo "LPIPS_MODEL=$LPIPS_MODEL"
 echo "IQA_CSV=$IQA_CSV"
 echo "EVAL_METRICS=$EVAL_METRICS"
-echo "GT_DIR=$GT_DIR"
 echo "RESIZE_PRED_TO_GT=$RESIZE_PRED_TO_GT"
+echo "METRICS_CSV=$METRICS_CSV"
 echo "=========================================="
 
 CUDA_VISIBLE_DEVICES="$GPU" "${CMD[@]}"
@@ -257,6 +300,7 @@ if [ "$EVAL_METRICS" = true ]; then
     python eval_metrics.py
     --pred_dir "$OUTPUT_DIR"
     --gt_dir "$GT_DIR"
+    --save_csv "$OUTPUT_DIR/$METRICS_CSV"
   )
 
   if [ "$RESIZE_PRED_TO_GT" = true ]; then
@@ -268,6 +312,7 @@ if [ "$EVAL_METRICS" = true ]; then
   echo "PRED_DIR=$OUTPUT_DIR"
   echo "GT_DIR=$GT_DIR"
   echo "RESIZE_PRED_TO_GT=$RESIZE_PRED_TO_GT"
+  echo "METRICS_CSV=$OUTPUT_DIR/$METRICS_CSV"
   echo "=========================================="
 
   "${EVAL_CMD[@]}"
@@ -303,4 +348,15 @@ PY
   else
     echo "[WARN] MANIQA CSV not found: $IQA_PATH"
   fi
+fi
+
+# ==========================================
+# Print Notion-friendly summary
+# ==========================================
+if [ "$EVAL_MANIQA" = true ] || [ "$EVAL_LPIPS" = true ] || [ "$EVAL_METRICS" = true ]; then
+  echo "=========================================="
+  echo "Notion summary"
+  echo "Copy the next lines into Notion:"
+  echo "=========================================="
+  python scripts/notion_metrics.py "$OUTPUT_DIR" --iqa_csv "$IQA_CSV" --metrics_csv "$METRICS_CSV" --format blocks
 fi

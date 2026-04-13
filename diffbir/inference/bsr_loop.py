@@ -11,13 +11,24 @@ from ..utils.common import (
 from ..pipeline import (
     BSRNetPipeline,
     SwinIRPipeline,
+    RestormerPipeline,
 )
 from ..model import RRDBNet, SwinIR
+from ..model.restormer_from_clone import RestormerFromClone
 
 
 class BSRInferenceLoop(InferenceLoop):
 
     def load_cleaner(self) -> None:
+        if getattr(self.args, "cleaner_type", "default") == "restormer":
+            self.cleaner = RestormerFromClone(
+                repo_dir=self.args.restormer_repo,
+                task=self.args.restormer_task,
+                ckpt_path=self.args.restormer_ckpt,
+            )
+            self.cleaner.eval().to(self.args.device)
+            return
+
         if self.args.version == "v1":
             config = "configs/inference/swinir.yaml"
             weight = MODELS["swinir_general"]
@@ -33,6 +44,16 @@ class BSRInferenceLoop(InferenceLoop):
         self.cleaner.eval().to(self.args.device)
 
     def load_pipeline(self) -> None:
+        if getattr(self.args, "cleaner_type", "default") == "restormer":
+            self.pipeline = RestormerPipeline(
+                self.cleaner,
+                self.cldm,
+                self.diffusion,
+                self.cond_fn,
+                self.args.device,
+            )
+            return
+
         if self.args.version == "v1":
             self.pipeline = SwinIRPipeline(
                 self.cleaner,
@@ -54,7 +75,10 @@ class BSRInferenceLoop(InferenceLoop):
             raise ValueError(f"Unsupported version for BSRInferenceLoop: {self.args.version}")
 
     def after_load_lq(self, lq: Image.Image) -> np.ndarray:
-        if self.args.version == "v1":
+        if (
+            self.args.version == "v1"
+            or getattr(self.args, "cleaner_type", "default") == "restormer"
+        ):
             lq = lq.resize(
                 tuple(int(x * self.args.upscale) for x in lq.size), Image.BICUBIC
             )

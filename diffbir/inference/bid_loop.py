@@ -6,18 +6,28 @@ from .loop import InferenceLoop, MODELS
 from ..utils.common import (
     instantiate_from_config,
     load_model_from_url,
-    trace_vram_usage,
 )
 from ..pipeline import (
     SwinIRPipeline,
     SCUNetPipeline,
+    RestormerPipeline,
 )
 from ..model import SwinIR, SCUNet
+from ..model.restormer_from_clone import RestormerFromClone
 
 
 class BIDInferenceLoop(InferenceLoop):
 
     def load_cleaner(self) -> None:
+        if getattr(self.args, "cleaner_type", "default") == "restormer":
+            self.cleaner = RestormerFromClone(
+                repo_dir=self.args.restormer_repo,
+                task=self.args.restormer_task,
+                ckpt_path=self.args.restormer_ckpt,
+            )
+            self.cleaner.eval().to(self.args.device)
+            return
+
         if self.args.version == "v1":
             config = "configs/inference/swinir.yaml"
             weight = MODELS["swinir_general"]
@@ -33,7 +43,9 @@ class BIDInferenceLoop(InferenceLoop):
         self.cleaner.eval().to(self.args.device)
 
     def load_pipeline(self) -> None:
-        if self.args.version == "v1":
+        if getattr(self.args, "cleaner_type", "default") == "restormer":
+            pipeline_class = RestormerPipeline
+        elif self.args.version == "v1":
             pipeline_class = SwinIRPipeline
         elif self.args.version in ["v2", "v2.1"]:
             pipeline_class = SCUNetPipeline
