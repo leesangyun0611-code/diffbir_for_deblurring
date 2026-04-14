@@ -13,14 +13,14 @@ PRECISION="fp16"              # fp32 / fp16 / bf16
 SEED=42
 
 # ---------- Current experiment ----------
-EXPERIMENT_NAME="exp1_4_wmse_rgb_highfreq_s1.5_gamma0.5_denoise"
+EXPERIMENT_NAME="exp2_restormer_wmse_rgb_lowfreq_s1.5_gamma1_denoise"
 TASK="denoise"                # sr / face / denoise / unaligned_face
 GUIDANCE=true                 # true / false
 G_LOSS="w_mse"                # mse / w_mse
 G_SCALE=1.5
 G_SPACE="rgb"                 # latent / rgb
-G_WEIGHT_MODE="highfreq"      # lowfreq / highfreq
-G_WEIGHT_GAMMA=0.5
+G_WEIGHT_MODE="lowfreq"       # lowfreq / highfreq
+G_WEIGHT_GAMMA=1.0
 
 # ---------- Task / version ----------
 VERSION="v2.1"                # v1 / v2 / v2.1 / custom
@@ -73,10 +73,14 @@ VAE_DECODER_TILE_SIZE=256
 
 # ---------- Restormer stage-1 cleaner ----------
 # Roll back to the original stage-1 path at any time with: CLEANER_TYPE="default"
-CLEANER_TYPE="default"      # default / restormer
+CLEANER_TYPE="restormer"    # default / restormer / nafnet / mprnet
 RESTORMER_REPO="third_party/Restormer"
 RESTORMER_TASK="Motion_Deblurring"
 RESTORMER_CKPT="${RESTORMER_REPO}/Motion_Deblurring/pretrained_models/motion_deblurring.pth"
+NAFNET_REPO="third_party/NAFNet"
+NAFNET_CKPT="weights/NAFNet-GoPro-width64.pth"
+MPRNET_REPO="third_party/MPRNet"
+MPRNET_CKPT="weights/MPRNet-Deblurring.pth"
 
 # ---------- Optional noise / sampler extras ----------
 NOISE_AUG=0
@@ -144,6 +148,12 @@ if [ "$CLEANER_TYPE" = "restormer" ]; then
   CMD+=(--restormer_repo "$RESTORMER_REPO")
   CMD+=(--restormer_task "$RESTORMER_TASK")
   CMD+=(--restormer_ckpt "$RESTORMER_CKPT")
+elif [ "$CLEANER_TYPE" = "nafnet" ]; then
+  CMD+=(--nafnet_repo "$NAFNET_REPO")
+  CMD+=(--nafnet_ckpt "$NAFNET_CKPT")
+elif [ "$CLEANER_TYPE" = "mprnet" ]; then
+  CMD+=(--mprnet_repo "$MPRNET_REPO")
+  CMD+=(--mprnet_ckpt "$MPRNET_CKPT")
 fi
 
 # Optional input resize
@@ -265,6 +275,10 @@ echo "CLEANER_TYPE=$CLEANER_TYPE"
 echo "RESTORMER_REPO=$RESTORMER_REPO"
 echo "RESTORMER_TASK=$RESTORMER_TASK"
 echo "RESTORMER_CKPT=$RESTORMER_CKPT"
+echo "NAFNET_REPO=$NAFNET_REPO"
+echo "NAFNET_CKPT=$NAFNET_CKPT"
+echo "MPRNET_REPO=$MPRNET_REPO"
+echo "MPRNET_CKPT=$MPRNET_CKPT"
 echo "CLEANER_TILED=$CLEANER_TILED"
 echo "CLDM_TILED=$CLDM_TILED"
 echo "VAE_ENCODER_TILED=$VAE_ENCODER_TILED"

@@ -44,6 +44,32 @@ def calc_psnr_ssim(pred: np.ndarray, gt: np.ndarray) -> tuple[float, float]:
     return float(psnr), float(ssim)
 
 
+def calc_lpips(lpips_metric, pred: np.ndarray, gt: np.ndarray, device: str) -> float:
+    if pred.shape != gt.shape:
+        raise ValueError(f"Shape mismatch: pred={pred.shape}, gt={gt.shape}")
+    pred_tensor = (
+        torch.from_numpy(pred)
+        .permute(2, 0, 1)
+        .unsqueeze(0)
+        .float()
+        .div(127.5)
+        .sub(1.0)
+        .to(device)
+    )
+    gt_tensor = (
+        torch.from_numpy(gt)
+        .permute(2, 0, 1)
+        .unsqueeze(0)
+        .float()
+        .div(127.5)
+        .sub(1.0)
+        .to(device)
+    )
+    with torch.no_grad():
+        score = lpips_metric(pred_tensor, gt_tensor)
+    return float(score.item())
+
+
 def build_file_map(folder: str) -> dict[str, str]:
     d = {}
     for p in sorted(Path(folder).iterdir()):
@@ -66,8 +92,8 @@ def preprocess_like_diffbir(lq_pil: Image.Image, task: str, version: str, upscal
         lq_pil = lq_pil.resize(new_size, Image.BICUBIC)
     elif task == "sr":
         # BSRInferenceLoop.after_load_lq():
-        # only v1 / v2.1 bicubic upscale before stage1
-        if version in ["v1", "v2.1"]:
+        # only v1 bicubic upscale before stage1 (default cleaner)
+        if version == "v1":
             new_size = tuple(int(x * upscale) for x in lq_pil.size)
             lq_pil = lq_pil.resize(new_size, Image.BICUBIC)
     else:
@@ -90,9 +116,9 @@ def load_stage1_pipeline(task: str, version: str, device: str, upscale: float):
             weight = MODELS["scunet_psnr"]
             pipeline_cls = SCUNetPipeline
         elif version == "v2.1":
-            config = "configs/inference/swinir.yaml"
-            weight = MODELS["swinir_realesrgan"]
-            pipeline_cls = SwinIRPipeline
+            config = "configs/inference/scunet.yaml"
+            weight = MODELS["scunet_psnr"]
+            pipeline_cls = SCUNetPipeline
         else:
             raise ValueError(version)
 
@@ -119,12 +145,12 @@ def load_stage1_pipeline(task: str, version: str, device: str, upscale: float):
             pipeline = BSRNetPipeline(cleaner, None, None, None, device, upscale)
 
         elif version == "v2.1":
-            config = "configs/inference/swinir.yaml"
-            weight = MODELS["swinir_realesrgan"]
+            config = "configs/inference/bsrnet.yaml"
+            weight = MODELS["bsrnet"]
             cleaner = instantiate_from_config(OmegaConf.load(config))
             cleaner.load_state_dict(load_model_from_url(weight), strict=True)
             cleaner.eval().to(device)
-            pipeline = SwinIRPipeline(cleaner, None, None, None, device)
+            pipeline = BSRNetPipeline(cleaner, None, None, None, device, upscale)
 
         else:
             raise ValueError(version)
@@ -192,6 +218,8 @@ def main():
     parser.add_argument("--output_dir", type=str, required=True)
     parser.add_argument("--upscale", type=float, default=1.0)
     parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument("--eval_lpips", action="store_true")
+    parser.add_argument("--lpips_model", type=str, default="alex", choices=["alex", "vgg"])
     parser.add_argument("--cleaner_tiled", action="store_true")
     parser.add_argument("--cleaner_tile_size", type=int, default=512)
     parser.add_argument("--cleaner_tile_stride", type=int, default=256)
@@ -219,11 +247,24 @@ def main():
     if not common:
         raise RuntimeError("No matched file stems between input_dir and gt_dir")
 
+    lpips_metric = None
+    if args.eval_lpips:
+        try:
+            import lpips  # type: ignore
+        except ImportError as exc:
+            raise ImportError(
+                "LPIPS evaluation requires 'lpips' to be installed. "
+                "Install with: pip install lpips"
+            ) from exc
+        lpips_metric = lpips.LPIPS(net=args.lpips_model).to(args.device)
+
     csv_path = os.path.join(args.output_dir, "stage1_metrics.csv")
     rows = []
 
     input_psnr_all, input_ssim_all = [], []
     stage1_psnr_all, stage1_ssim_all = [], []
+    input_lpips_all = []
+    stage1_lpips_all = []
 
     for stem in common:
         lq_pil = Image.open(input_map[stem]).convert("RGB")
@@ -262,19 +303,30 @@ def main():
 
         input_psnr, input_ssim = calc_psnr_ssim(input_for_metric, gt)
         stage1_psnr, stage1_ssim = calc_psnr_ssim(stage1_for_metric, gt)
+        input_lpips = None
+        stage1_lpips = None
+        if lpips_metric is not None:
+            input_lpips = calc_lpips(lpips_metric, input_for_metric, gt, args.device)
+            stage1_lpips = calc_lpips(lpips_metric, stage1_for_metric, gt, args.device)
 
         input_psnr_all.append(input_psnr)
         input_ssim_all.append(input_ssim)
         stage1_psnr_all.append(stage1_psnr)
         stage1_ssim_all.append(stage1_ssim)
+        if input_lpips is not None:
+            input_lpips_all.append(input_lpips)
+        if stage1_lpips is not None:
+            stage1_lpips_all.append(stage1_lpips)
 
         rows.append(
             {
                 "image": stem,
                 "input_psnr": input_psnr,
                 "input_ssim": input_ssim,
+                "input_lpips": input_lpips,
                 "stage1_psnr": stage1_psnr,
                 "stage1_ssim": stage1_ssim,
+                "stage1_lpips": stage1_lpips,
                 "delta_psnr": stage1_psnr - input_psnr,
                 "delta_ssim": stage1_ssim - input_ssim,
                 "stage1_path": stage1_save_path,
@@ -287,6 +339,10 @@ def main():
             f"stage1 PSNR/SSIM = {stage1_psnr:.4f}/{stage1_ssim:.4f}, "
             f"delta = {stage1_psnr - input_psnr:+.4f}/{stage1_ssim - input_ssim:+.4f}"
         )
+        if input_lpips is not None:
+            print(f"[{stem}] input LPIPS = {input_lpips:.6f}")
+        if stage1_lpips is not None:
+            print(f"[{stem}] stage1 LPIPS = {stage1_lpips:.6f}")
 
     with open(csv_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(
@@ -295,8 +351,10 @@ def main():
                 "image",
                 "input_psnr",
                 "input_ssim",
+                "input_lpips",
                 "stage1_psnr",
                 "stage1_ssim",
+                "stage1_lpips",
                 "delta_psnr",
                 "delta_ssim",
                 "stage1_path",
@@ -308,8 +366,12 @@ def main():
     print("\n===== Average =====")
     print(f"input  PSNR: {np.mean(input_psnr_all):.4f}")
     print(f"input  SSIM: {np.mean(input_ssim_all):.4f}")
+    if input_lpips_all:
+        print(f"input  LPIPS: {np.mean(input_lpips_all):.6f}")
     print(f"stage1 PSNR: {np.mean(stage1_psnr_all):.4f}")
     print(f"stage1 SSIM: {np.mean(stage1_ssim_all):.4f}")
+    if stage1_lpips_all:
+        print(f"stage1 LPIPS: {np.mean(stage1_lpips_all):.6f}")
     print(f"delta  PSNR: {np.mean(np.array(stage1_psnr_all) - np.array(input_psnr_all)):.4f}")
     print(f"delta  SSIM: {np.mean(np.array(stage1_ssim_all) - np.array(input_ssim_all)):.4f}")
     print(f"\nSaved stage1 images to: {stage1_dir}")

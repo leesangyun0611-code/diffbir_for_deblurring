@@ -233,7 +233,7 @@ def parse_args() -> Namespace:
         "--cleaner_type",
         type=str,
         default="default",
-        choices=["default", "restormer"],
+        choices=["default", "restormer", "nafnet", "mprnet"],
         help="Override stage-1 cleaner. Use 'restormer' to replace the default DiffBIR cleaner.",
     )
     parser.add_argument(
@@ -259,6 +259,30 @@ def parse_args() -> Namespace:
         type=str,
         default="",
         help="Path to local Restormer checkpoint.",
+    )
+    parser.add_argument(
+        "--nafnet_repo",
+        type=str,
+        default="third_party/NAFNet",
+        help="Path to cloned NAFNet repository.",
+    )
+    parser.add_argument(
+        "--nafnet_ckpt",
+        type=str,
+        default="",
+        help="Path to NAFNet checkpoint.",
+    )
+    parser.add_argument(
+        "--mprnet_repo",
+        type=str,
+        default="third_party/MPRNet",
+        help="Path to cloned MPRNet repository.",
+    )
+    parser.add_argument(
+        "--mprnet_ckpt",
+        type=str,
+        default="",
+        help="Path to MPRNet checkpoint.",
     )
 
     parser.add_argument(

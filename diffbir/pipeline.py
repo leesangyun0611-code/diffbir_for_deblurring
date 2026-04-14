@@ -526,3 +526,79 @@ class RestormerPipeline(Pipeline):
             output = resize_short_edge_to(output, size=512)
 
         return output
+
+
+class NAFNetPipeline(Pipeline):
+
+    @staticmethod
+    def _pad_reflect_to_multiple(
+        x: torch.Tensor, multiple: int = 8
+    ) -> tuple[torch.Tensor, int, int]:
+        _, _, h, w = x.size()
+        ph = (multiple - h % multiple) % multiple
+        pw = (multiple - w % multiple) % multiple
+        if ph == 0 and pw == 0:
+            return x, h, w
+        x = F.pad(x, (0, pw, 0, ph), mode="reflect")
+        return x, h, w
+
+    def apply_cleaner(
+        self, lq: torch.Tensor, tiled: bool, tile_size: int, tile_stride: int
+    ) -> torch.Tensor:
+        if min(lq.shape[2:]) < 512:
+            lq = resize_short_edge_to(lq, size=512)
+
+        if tiled and (lq.size(2) < tile_size or lq.size(3) < tile_size):
+            print("[NAFNet]: input is smaller than tile size, disable cleaner tiling.")
+            tiled = False
+
+        lq, h0, w0 = self._pad_reflect_to_multiple(lq, multiple=8)
+
+        if tiled:
+            model = make_tiled_fn(self.cleaner, tile_size, tile_stride)
+            output = model(lq)
+        else:
+            output = self.cleaner(lq)
+
+        output = output[:, :, :h0, :w0]
+        if min(output.shape[2:]) < 512:
+            output = resize_short_edge_to(output, size=512)
+        return output
+
+
+class MPRNetPipeline(Pipeline):
+
+    @staticmethod
+    def _pad_reflect_to_multiple(
+        x: torch.Tensor, multiple: int = 8
+    ) -> tuple[torch.Tensor, int, int]:
+        _, _, h, w = x.size()
+        ph = (multiple - h % multiple) % multiple
+        pw = (multiple - w % multiple) % multiple
+        if ph == 0 and pw == 0:
+            return x, h, w
+        x = F.pad(x, (0, pw, 0, ph), mode="reflect")
+        return x, h, w
+
+    def apply_cleaner(
+        self, lq: torch.Tensor, tiled: bool, tile_size: int, tile_stride: int
+    ) -> torch.Tensor:
+        if min(lq.shape[2:]) < 512:
+            lq = resize_short_edge_to(lq, size=512)
+
+        if tiled and (lq.size(2) < tile_size or lq.size(3) < tile_size):
+            print("[MPRNet]: input is smaller than tile size, disable cleaner tiling.")
+            tiled = False
+
+        lq, h0, w0 = self._pad_reflect_to_multiple(lq, multiple=8)
+
+        if tiled:
+            model = make_tiled_fn(self.cleaner, tile_size, tile_stride)
+            output = model(lq)
+        else:
+            output = self.cleaner(lq)
+
+        output = output[:, :, :h0, :w0]
+        if min(output.shape[2:]) < 512:
+            output = resize_short_edge_to(output, size=512)
+        return output

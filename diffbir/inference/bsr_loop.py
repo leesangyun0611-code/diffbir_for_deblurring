@@ -12,9 +12,13 @@ from ..pipeline import (
     BSRNetPipeline,
     SwinIRPipeline,
     RestormerPipeline,
+    NAFNetPipeline,
+    MPRNetPipeline,
 )
 from ..model import RRDBNet, SwinIR
 from ..model.restormer_from_clone import RestormerFromClone
+from ..model.nafnet_from_clone import NAFNetFromClone
+from ..model.mprnet_from_clone import MPRNetFromClone
 
 
 class BSRInferenceLoop(InferenceLoop):
@@ -25,6 +29,20 @@ class BSRInferenceLoop(InferenceLoop):
                 repo_dir=self.args.restormer_repo,
                 task=self.args.restormer_task,
                 ckpt_path=self.args.restormer_ckpt,
+            )
+            self.cleaner.eval().to(self.args.device)
+            return
+        if getattr(self.args, "cleaner_type", "default") == "nafnet":
+            self.cleaner = NAFNetFromClone(
+                repo_dir=self.args.nafnet_repo,
+                ckpt_path=self.args.nafnet_ckpt,
+            )
+            self.cleaner.eval().to(self.args.device)
+            return
+        if getattr(self.args, "cleaner_type", "default") == "mprnet":
+            self.cleaner = MPRNetFromClone(
+                repo_dir=self.args.mprnet_repo,
+                ckpt_path=self.args.mprnet_ckpt,
             )
             self.cleaner.eval().to(self.args.device)
             return
@@ -46,6 +64,24 @@ class BSRInferenceLoop(InferenceLoop):
     def load_pipeline(self) -> None:
         if getattr(self.args, "cleaner_type", "default") == "restormer":
             self.pipeline = RestormerPipeline(
+                self.cleaner,
+                self.cldm,
+                self.diffusion,
+                self.cond_fn,
+                self.args.device,
+            )
+            return
+        if getattr(self.args, "cleaner_type", "default") == "nafnet":
+            self.pipeline = NAFNetPipeline(
+                self.cleaner,
+                self.cldm,
+                self.diffusion,
+                self.cond_fn,
+                self.args.device,
+            )
+            return
+        if getattr(self.args, "cleaner_type", "default") == "mprnet":
+            self.pipeline = MPRNetPipeline(
                 self.cleaner,
                 self.cldm,
                 self.diffusion,
@@ -77,7 +113,7 @@ class BSRInferenceLoop(InferenceLoop):
     def after_load_lq(self, lq: Image.Image) -> np.ndarray:
         if (
             self.args.version == "v1"
-            or getattr(self.args, "cleaner_type", "default") == "restormer"
+            or getattr(self.args, "cleaner_type", "default") in ["restormer", "nafnet", "mprnet"]
         ):
             lq = lq.resize(
                 tuple(int(x * self.args.upscale) for x in lq.size), Image.BICUBIC

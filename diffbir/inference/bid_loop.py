@@ -11,9 +11,13 @@ from ..pipeline import (
     SwinIRPipeline,
     SCUNetPipeline,
     RestormerPipeline,
+    NAFNetPipeline,
+    MPRNetPipeline,
 )
 from ..model import SwinIR, SCUNet
 from ..model.restormer_from_clone import RestormerFromClone
+from ..model.nafnet_from_clone import NAFNetFromClone
+from ..model.mprnet_from_clone import MPRNetFromClone
 
 
 class BIDInferenceLoop(InferenceLoop):
@@ -24,6 +28,20 @@ class BIDInferenceLoop(InferenceLoop):
                 repo_dir=self.args.restormer_repo,
                 task=self.args.restormer_task,
                 ckpt_path=self.args.restormer_ckpt,
+            )
+            self.cleaner.eval().to(self.args.device)
+            return
+        if getattr(self.args, "cleaner_type", "default") == "nafnet":
+            self.cleaner = NAFNetFromClone(
+                repo_dir=self.args.nafnet_repo,
+                ckpt_path=self.args.nafnet_ckpt,
+            )
+            self.cleaner.eval().to(self.args.device)
+            return
+        if getattr(self.args, "cleaner_type", "default") == "mprnet":
+            self.cleaner = MPRNetFromClone(
+                repo_dir=self.args.mprnet_repo,
+                ckpt_path=self.args.mprnet_ckpt,
             )
             self.cleaner.eval().to(self.args.device)
             return
@@ -45,6 +63,10 @@ class BIDInferenceLoop(InferenceLoop):
     def load_pipeline(self) -> None:
         if getattr(self.args, "cleaner_type", "default") == "restormer":
             pipeline_class = RestormerPipeline
+        elif getattr(self.args, "cleaner_type", "default") == "nafnet":
+            pipeline_class = NAFNetPipeline
+        elif getattr(self.args, "cleaner_type", "default") == "mprnet":
+            pipeline_class = MPRNetPipeline
         elif self.args.version == "v1":
             pipeline_class = SwinIRPipeline
         elif self.args.version in ["v2", "v2.1"]:
