@@ -13,13 +13,13 @@ PRECISION="fp16"              # fp32 / fp16 / bf16
 SEED=42
 
 # ---------- Current experiment ----------
-EXPERIMENT_NAME="exp2_restormer_wmse_rgb_lowfreq_s1.5_gamma1_denoise"
+EXPERIMENT_NAME="exp3_wmse_rgb_highfreq_s1.5_gamma1_denoise_lora2000_test_image_text"
 TASK="denoise"                # sr / face / denoise / unaligned_face
 GUIDANCE=true                 # true / false
 G_LOSS="w_mse"                # mse / w_mse
 G_SCALE=1.5
 G_SPACE="rgb"                 # latent / rgb
-G_WEIGHT_MODE="lowfreq"       # lowfreq / highfreq
+G_WEIGHT_MODE="highfreq"      # lowfreq / highfreq
 G_WEIGHT_GAMMA=1.0
 
 # ---------- Task / version ----------
@@ -27,8 +27,8 @@ VERSION="v2.1"                # v1 / v2 / v2.1 / custom
 UPSCALE=1
 
 # ---------- Paths ----------
-INPUT_DIR="inputs/demo/input_test"
-GT_DIR="GT"
+INPUT_DIR="inputs/demo/test_image_text"
+GT_DIR="GT/test_image_text_GT"
 RESULTS_ROOT="results"
 OUTPUT_DIR="${RESULTS_ROOT}/${EXPERIMENT_NAME}"
 
@@ -73,7 +73,7 @@ VAE_DECODER_TILE_SIZE=256
 
 # ---------- Restormer stage-1 cleaner ----------
 # Roll back to the original stage-1 path at any time with: CLEANER_TYPE="default"
-CLEANER_TYPE="restormer"    # default / restormer / nafnet / mprnet
+CLEANER_TYPE="restormer"       # default / restormer / nafnet / mprnet
 RESTORMER_REPO="third_party/Restormer"
 RESTORMER_TASK="Motion_Deblurring"
 RESTORMER_CKPT="${RESTORMER_REPO}/Motion_Deblurring/pretrained_models/motion_deblurring.pth"
@@ -116,6 +116,7 @@ METRICS_CSV="metrics_psnr_ssim.csv"
 # ---------- Custom model paths (optional) ----------
 TRAIN_CFG=""
 CKPT=""
+LORA_CKPT="experiments/stage2_lora_paired/checkpoints/lora_0002000.pt"
 
 # ==========================================
 # Build inference command
@@ -241,6 +242,10 @@ if [ -n "$CKPT" ]; then
   CMD+=(--ckpt "$CKPT")
 fi
 
+if [ -n "$LORA_CKPT" ]; then
+  CMD+=(--lora_ckpt "$LORA_CKPT")
+fi
+
 # Optional sampler extras
 CMD+=(--noise_aug "$NOISE_AUG")
 CMD+=(--eta "$ETA")
@@ -302,6 +307,7 @@ echo "IQA_CSV=$IQA_CSV"
 echo "EVAL_METRICS=$EVAL_METRICS"
 echo "RESIZE_PRED_TO_GT=$RESIZE_PRED_TO_GT"
 echo "METRICS_CSV=$METRICS_CSV"
+echo "LORA_CKPT=$LORA_CKPT"
 echo "=========================================="
 
 CUDA_VISIBLE_DEVICES="$GPU" "${CMD[@]}"

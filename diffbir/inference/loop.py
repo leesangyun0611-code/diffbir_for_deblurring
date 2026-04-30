@@ -18,6 +18,7 @@ from .pretrained_models import MODELS
 from ..pipeline import Pipeline
 from ..utils.cond_fn import MSEGuidance, WeightedMSEGuidance
 from ..model import ControlLDM, Diffusion
+from ..model.lora import load_lora_checkpoint
 from ..utils.caption import (
     LLaVACaptioner,
     EmptyCaptioner,
@@ -84,6 +85,9 @@ class InferenceLoop:
 
         self.cldm.load_controlnet_from_ckpt(control_weight)
         print("load controlnet weight")
+        if getattr(self.args, "lora_ckpt", ""):
+            load_lora_checkpoint(self.cldm.controlnet, self.args.lora_ckpt)
+            print(f"load controlnet LoRA weight: {self.args.lora_ckpt}")
         self.cldm.eval().to(self.args.device)
 
         cast_type = {

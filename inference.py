@@ -175,6 +175,12 @@ def parse_args() -> Namespace:
         default="",
         help="Path to saved checkpoint. Only works when version is custom.",
     )
+    parser.add_argument(
+        "--lora_ckpt",
+        type=str,
+        default="",
+        help="Path to a ControlNet LoRA checkpoint trained by train_stage2_lora.py.",
+    )
 
     # sampling parameters
     parser.add_argument(
