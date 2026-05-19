@@ -33,6 +33,13 @@ def main(args) -> None:
         cfg.train.train_steps = args.train_steps
     if args.image_every is not None:
         cfg.train.image_every = args.image_every
+    if args.train_text_loss and accelerator.is_main_process:
+        print(
+            "[TextGuidance][Train] Text-loss hooks are enabled for configuration "
+            "tracking, but online OCR is not run in the training loop. Use "
+            "--text_mask_dir with precomputed masks when wiring the auxiliary "
+            "loss into diffusion training."
+        )
 
     if accelerator.is_main_process:
         exp_dir = cfg.train.exp_dir
@@ -273,5 +280,13 @@ if __name__ == "__main__":
     parser.add_argument("--config", type=str, required=True)
     parser.add_argument("--train_steps", type=int, default=None)
     parser.add_argument("--image_every", type=int, default=None)
+    parser.add_argument("--train_text_loss", action="store_true")
+    parser.add_argument("--text_loss_weight", type=float, default=0.0)
+    parser.add_argument("--text_rgb_weight", type=float, default=0.1)
+    parser.add_argument("--text_edge_weight", type=float, default=1.0)
+    parser.add_argument("--text_mask_dir", type=str, default="")
+    parser.add_argument("--freeze_stage1", action="store_true", default=True)
+    parser.add_argument("--finetune_stage2_only", action="store_true")
+    parser.add_argument("--lora_text_finetune", action="store_true")
     args = parser.parse_args()
     main(args)

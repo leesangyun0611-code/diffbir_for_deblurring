@@ -1,4 +1,5 @@
 import numpy as np
+import torch
 from PIL import Image
 from omegaconf import OmegaConf
 
@@ -41,10 +42,10 @@ class BFRInferenceLoop(InferenceLoop):
             self.cleaner.eval().to(self.args.device)
             return
 
-        self.cleaner: SwinIR = instantiate_from_config(
-            OmegaConf.load("configs/inference/swinir.yaml")
-        )
-        weight = load_model_from_url(MODELS["swinir_face"])
+        config = self.args.stage1_config or "configs/inference/swinir.yaml"
+        self.cleaner: SwinIR = instantiate_from_config(OmegaConf.load(config))
+        weight_path = self.args.stage1_ckpt or MODELS["swinir_face"]
+        weight = load_model_from_url(weight_path) if weight_path.startswith("http") else torch.load(weight_path, map_location="cpu")
         self.cleaner.load_state_dict(weight, strict=True)
         self.cleaner.eval().to(self.args.device)
 

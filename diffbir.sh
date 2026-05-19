@@ -7,116 +7,145 @@ set -eo pipefail
 # ==========================================
 
 # ---------- Device ----------
-GPU=0
-DEVICE="cuda"                 # cpu / cuda / mps
-PRECISION="fp16"              # fp32 / fp16 / bf16
-SEED=42
+GPU=${GPU:-0}
+DEVICE=${DEVICE:-cuda}                 # cpu / cuda / mps
+PRECISION=${PRECISION:-fp16}           # fp32 / fp16 / bf16
+SEED=${SEED:-42}
 
 # ---------- Current experiment ----------
-EXPERIMENT_NAME="exp3_wmse_rgb_highfreq_s1.5_gamma1_denoise_lora2000_test_image_text"
-TASK="denoise"                # sr / face / denoise / unaligned_face
-GUIDANCE=true                 # true / false
-G_LOSS="w_mse"                # mse / w_mse
-G_SCALE=1.5
-G_SPACE="rgb"                 # latent / rgb
-G_WEIGHT_MODE="highfreq"      # lowfreq / highfreq
-G_WEIGHT_GAMMA=1.0
+EXPERIMENT_NAME=${EXPERIMENT_NAME:-text_guidance_test}
+TASK=${TASK:-sr}                       # sr / face / denoise / unaligned_face
+GUIDANCE=${GUIDANCE:-false}            # true / false
+G_LOSS=${G_LOSS:-w_mse}                # mse / w_mse
+G_SCALE=${G_SCALE:-0.0}
+G_SPACE=${G_SPACE:-rgb}                # latent / rgb
+G_WEIGHT_MODE=${G_WEIGHT_MODE:-highfreq} # lowfreq / highfreq
+G_WEIGHT_GAMMA=${G_WEIGHT_GAMMA:-1.0}
 
 # ---------- Task / version ----------
-VERSION="v2.1"                # v1 / v2 / v2.1 / custom
-UPSCALE=1
+VERSION=${VERSION:-v2.1}               # v1 / v2 / v2.1 / custom
+UPSCALE=${UPSCALE:-1}
 
 # ---------- Paths ----------
-INPUT_DIR="inputs/demo/test_image_text"
-GT_DIR="GT/test_image_text_GT"
-RESULTS_ROOT="results"
+INPUT_DIR=${INPUT:-${INPUT_DIR:-inputs/demo/mytest}}
+GT_DIR=${GT_DIR:-}
+RESULTS_ROOT=${RESULTS_ROOT:-results}
 OUTPUT_DIR="${RESULTS_ROOT}/${EXPERIMENT_NAME}"
+OUTPUT_DIR=${OUTPUT:-${OUTPUT_DIR:-results/text_guidance_test}}
 
 # ---------- Optional input resize ----------
-AUTO_RESIZE=false             # true / false
-MAX_INPUT_SIDE=511            # only used when AUTO_RESIZE=true
+AUTO_RESIZE=${AUTO_RESIZE:-false}      # true / false
+MAX_INPUT_SIDE=${MAX_INPUT_SIDE:-511}  # only used when AUTO_RESIZE=true
 
 # ---------- Sampling ----------
-SAMPLER="spaced"              # spaced / ddim / dpm++_m2 / edm_euler / ...
-STEPS=40
-CFG_SCALE=4
-RESCALE_CFG=false             # true / false
+SAMPLER=${SAMPLER:-spaced}             # spaced / ddim / dpm++_m2 / edm_euler / ...
+STEPS=${STEPS:-50}
+CFG_SCALE=${CFG_SCALE:-4}
+RESCALE_CFG=${RESCALE_CFG:-false}      # true / false
 
 # ---------- Start point ----------
-START_POINT_TYPE="cond"       # cond / noise
-START_POINT_NOISE_SCALE=""    # e.g. 0.3, 1.0 ; leave empty to disable
+START_POINT_TYPE=${START_POINT_TYPE:-cond} # cond / noise
+START_POINT_NOISE_SCALE=${START_POINT_NOISE_SCALE:-} # e.g. 0.3, 1.0 ; leave empty to disable
 
 # ---------- Batch / outputs ----------
-N_SAMPLES=1
-BATCH_SIZE=1
+N_SAMPLES=${N_SAMPLES:-1}
+BATCH_SIZE=${BATCH_SIZE:-1}
 
 # ---------- Prompt / caption ----------
-CAPTIONER="none"              # none / llava / ram
-POS_PROMPT="a sharp, clean, natural photo, no motion blur, high detail"
-NEG_PROMPT="motion blur, blurry, ghosting, smear, low quality, artifacts"
+CAPTIONER=${CAPTIONER:-none}           # none / llava / ram
+POS_PROMPT=${POS_PROMPT:-"a sharp, clean, natural photo, no motion blur, high detail"}
+NEG_PROMPT=${NEG_PROMPT:-"motion blur, blurry, ghosting, smear, low quality, artifacts"}
 
 # ---------- Tile toggles ----------
-CLEANER_TILED=false
-CLDM_TILED=false
-VAE_ENCODER_TILED=false
-VAE_DECODER_TILED=false
+CLEANER_TILED=${CLEANER_TILED:-false}
+CLDM_TILED=${CLDM_TILED:-false}
+VAE_ENCODER_TILED=${VAE_ENCODER_TILED:-false}
+VAE_DECODER_TILED=${VAE_DECODER_TILED:-false}
 
 # ---------- Tile sizes / strides ----------
-CLEANER_TILE_SIZE=512
-CLEANER_TILE_STRIDE=256
+CLEANER_TILE_SIZE=${CLEANER_TILE_SIZE:-512}
+CLEANER_TILE_STRIDE=${CLEANER_TILE_STRIDE:-256}
 
-CLDM_TILE_SIZE=256
-CLDM_TILE_STRIDE=128
+CLDM_TILE_SIZE=${CLDM_TILE_SIZE:-256}
+CLDM_TILE_STRIDE=${CLDM_TILE_STRIDE:-128}
 
-VAE_ENCODER_TILE_SIZE=1024
-VAE_DECODER_TILE_SIZE=256
+VAE_ENCODER_TILE_SIZE=${VAE_ENCODER_TILE_SIZE:-1024}
+VAE_DECODER_TILE_SIZE=${VAE_DECODER_TILE_SIZE:-256}
 
 # ---------- Restormer stage-1 cleaner ----------
-# Roll back to the original stage-1 path at any time with: CLEANER_TYPE="default"
-CLEANER_TYPE="restormer"       # default / restormer / nafnet / mprnet
-RESTORMER_REPO="third_party/Restormer"
-RESTORMER_TASK="Motion_Deblurring"
-RESTORMER_CKPT="${RESTORMER_REPO}/Motion_Deblurring/pretrained_models/motion_deblurring.pth"
-NAFNET_REPO="third_party/NAFNet"
-NAFNET_CKPT="weights/NAFNet-GoPro-width64.pth"
-MPRNET_REPO="third_party/MPRNet"
-MPRNET_CKPT="weights/MPRNet-Deblurring.pth"
+# Roll back to the original stage-1 path with: STAGE1_MODEL=default
+STAGE1_MODEL=${STAGE1_MODEL:-swinir}   # options: default, swinir, nafnet, restormer, mprnet
+STAGE1_CKPT=${STAGE1_CKPT:-}
+STAGE1_CONFIG=${STAGE1_CONFIG:-}
+CLEANER_TYPE=${CLEANER_TYPE:-default} # legacy alias used by existing code
+RESTORMER_REPO=${RESTORMER_REPO:-third_party/Restormer}
+RESTORMER_TASK=${RESTORMER_TASK:-Motion_Deblurring}
+RESTORMER_CKPT=${RESTORMER_CKPT:-${RESTORMER_REPO}/Motion_Deblurring/pretrained_models/motion_deblurring.pth}
+NAFNET_REPO=${NAFNET_REPO:-third_party/NAFNet}
+NAFNET_CKPT=${NAFNET_CKPT:-weights/NAFNet-GoPro-width64.pth}
+MPRNET_REPO=${MPRNET_REPO:-third_party/MPRNet}
+MPRNET_CKPT=${MPRNET_CKPT:-weights/MPRNet-Deblurring.pth}
+
+# ---------- Text-aware guidance ----------
+TEXT_GUIDANCE=${TEXT_GUIDANCE:-true}
+TEXT_DETECTOR=${TEXT_DETECTOR:-easyocr}
+TEXT_MASK_SOURCE=${TEXT_MASK_SOURCE:-union}
+TEXT_GUIDANCE_SCALE=${TEXT_GUIDANCE_SCALE:-0.3}
+TEXT_RGB_WEIGHT=${TEXT_RGB_WEIGHT:-0.1}
+TEXT_EDGE_WEIGHT=${TEXT_EDGE_WEIGHT:-1.0}
+TEXT_GUIDANCE_START=${TEXT_GUIDANCE_START:-0.0}
+TEXT_GUIDANCE_STOP=${TEXT_GUIDANCE_STOP:-0.35}
+TEXT_GUIDANCE_MODE=${TEXT_GUIDANCE_MODE:-late}
+TEXT_GRAD_CLIP=${TEXT_GRAD_CLIP:-0.05}
+TEXT_GUIDANCE_LOSS=${TEXT_GUIDANCE_LOSS:-edge_rgb}
+TEXT_MASK_DILATE=${TEXT_MASK_DILATE:-5}
+TEXT_MASK_BLUR=${TEXT_MASK_BLUR:-1.0}
+TEXT_MIN_CONFIDENCE=${TEXT_MIN_CONFIDENCE:-0.3}
+TEXT_MIN_AREA=${TEXT_MIN_AREA:-0}
+EASYOCR_LANGS=${EASYOCR_LANGS:-ko,en}
+EASYOCR_TEXT_THRESHOLD=${EASYOCR_TEXT_THRESHOLD:-0.4}
+EASYOCR_LOW_TEXT=${EASYOCR_LOW_TEXT:-0.2}
+EASYOCR_LINK_THRESHOLD=${EASYOCR_LINK_THRESHOLD:-0.4}
+EASYOCR_CANVAS_SIZE=${EASYOCR_CANVAS_SIZE:-2560}
+EASYOCR_MAG_RATIO=${EASYOCR_MAG_RATIO:-2.0}
+SAVE_TEXT_MASK=${SAVE_TEXT_MASK:-true}
+TEXT_DEBUG_DIR=${TEXT_DEBUG_DIR:-}
 
 # ---------- Optional noise / sampler extras ----------
-NOISE_AUG=0
-ETA=0
-ORDER=2
-STRENGTH=1.0
-S_CHURN=0
-S_TMIN=0
-S_TMAX=999
-S_NOISE=1.0
+NOISE_AUG=${NOISE_AUG:-0}
+ETA=${ETA:-0}
+ORDER=${ORDER:-2}
+STRENGTH=${STRENGTH:-1.0}
+S_CHURN=${S_CHURN:-0}
+S_TMIN=${S_TMIN:-0}
+S_TMAX=${S_TMAX:-999}
+S_NOISE=${S_NOISE:-1.0}
 
 # ---------- Guidance shared options ----------
-G_START=1001
-G_STOP=1
-G_REPEAT=1
-G_WEIGHT_FLOOR=0.0
-G_BLOCK_SIZE=2
+G_START=${G_START:-1001}
+G_STOP=${G_STOP:-1}
+G_REPEAT=${G_REPEAT:-1}
+G_WEIGHT_FLOOR=${G_WEIGHT_FLOOR:-0.0}
+G_BLOCK_SIZE=${G_BLOCK_SIZE:-2}
 
 # ---------- MANIQA evaluation ----------
-EVAL_MANIQA=true             # true / false
-MANIQA_MODEL="maniqa-pipal"  # maniqa / maniqa-kadid / maniqa-pipal
-IQA_CSV="iqa_results.csv"
+EVAL_MANIQA=${EVAL_MANIQA:-false}      # true / false
+MANIQA_MODEL=${MANIQA_MODEL:-maniqa-pipal} # maniqa / maniqa-kadid / maniqa-pipal
+IQA_CSV=${IQA_CSV:-iqa_results.csv}
 
 # ---------- LPIPS evaluation ----------
-EVAL_LPIPS=true              # true / false
-LPIPS_MODEL="alex"           # alex / vgg
+EVAL_LPIPS=${EVAL_LPIPS:-false}        # true / false
+LPIPS_MODEL=${LPIPS_MODEL:-alex}       # alex / vgg
 
 # ---------- GT-based metric evaluation ----------
-EVAL_METRICS=true            # true / false
-RESIZE_PRED_TO_GT=false      # true / false
-METRICS_CSV="metrics_psnr_ssim.csv"
+EVAL_METRICS=${EVAL_METRICS:-false}    # true / false
+RESIZE_PRED_TO_GT=${RESIZE_PRED_TO_GT:-false} # true / false
+METRICS_CSV=${METRICS_CSV:-metrics_psnr_ssim.csv}
 
 # ---------- Custom model paths (optional) ----------
-TRAIN_CFG=""
-CKPT=""
-LORA_CKPT="experiments/stage2_lora_paired/checkpoints/lora_0002000.pt"
+TRAIN_CFG=${TRAIN_CFG:-}
+CKPT=${CKPT:-}
+LORA_CKPT=${LORA_CKPT:-}
 
 # ==========================================
 # Build inference command
@@ -144,17 +173,24 @@ CMD+=(--seed "$SEED")
 CMD+=(--device "$DEVICE")
 
 # Stage-1 cleaner selection
+CMD+=(--stage1_model "$STAGE1_MODEL")
 CMD+=(--cleaner_type "$CLEANER_TYPE")
-if [ "$CLEANER_TYPE" = "restormer" ]; then
+if [ -n "$STAGE1_CKPT" ]; then
+  CMD+=(--stage1_ckpt "$STAGE1_CKPT")
+fi
+if [ -n "$STAGE1_CONFIG" ]; then
+  CMD+=(--stage1_config "$STAGE1_CONFIG")
+fi
+if [ "$STAGE1_MODEL" = "restormer" ] || [ "$CLEANER_TYPE" = "restormer" ]; then
   CMD+=(--restormer_repo "$RESTORMER_REPO")
   CMD+=(--restormer_task "$RESTORMER_TASK")
-  CMD+=(--restormer_ckpt "$RESTORMER_CKPT")
-elif [ "$CLEANER_TYPE" = "nafnet" ]; then
+  CMD+=(--restormer_ckpt "${STAGE1_CKPT:-$RESTORMER_CKPT}")
+elif [ "$STAGE1_MODEL" = "nafnet" ] || [ "$CLEANER_TYPE" = "nafnet" ]; then
   CMD+=(--nafnet_repo "$NAFNET_REPO")
-  CMD+=(--nafnet_ckpt "$NAFNET_CKPT")
-elif [ "$CLEANER_TYPE" = "mprnet" ]; then
+  CMD+=(--nafnet_ckpt "${STAGE1_CKPT:-$NAFNET_CKPT}")
+elif [ "$STAGE1_MODEL" = "mprnet" ] || [ "$CLEANER_TYPE" = "mprnet" ]; then
   CMD+=(--mprnet_repo "$MPRNET_REPO")
-  CMD+=(--mprnet_ckpt "$MPRNET_CKPT")
+  CMD+=(--mprnet_ckpt "${STAGE1_CKPT:-$MPRNET_CKPT}")
 fi
 
 # Optional input resize
@@ -202,6 +238,36 @@ if [ "$GUIDANCE" = true ]; then
   CMD+=(--g_weight_floor "$G_WEIGHT_FLOOR")
   CMD+=(--g_weight_gamma "$G_WEIGHT_GAMMA")
   CMD+=(--g_block_size "$G_BLOCK_SIZE")
+fi
+
+if [ "$TEXT_GUIDANCE" = true ]; then
+  CMD+=(--text_guidance)
+  CMD+=(--text_detector "$TEXT_DETECTOR")
+  CMD+=(--text_mask_source "$TEXT_MASK_SOURCE")
+  CMD+=(--text_guidance_scale "$TEXT_GUIDANCE_SCALE")
+  CMD+=(--text_rgb_weight "$TEXT_RGB_WEIGHT")
+  CMD+=(--text_edge_weight "$TEXT_EDGE_WEIGHT")
+  CMD+=(--text_guidance_start "$TEXT_GUIDANCE_START")
+  CMD+=(--text_guidance_stop "$TEXT_GUIDANCE_STOP")
+  CMD+=(--text_guidance_mode "$TEXT_GUIDANCE_MODE")
+  CMD+=(--text_grad_clip "$TEXT_GRAD_CLIP")
+  CMD+=(--text_guidance_loss "$TEXT_GUIDANCE_LOSS")
+  CMD+=(--text_mask_dilate "$TEXT_MASK_DILATE")
+  CMD+=(--text_mask_blur "$TEXT_MASK_BLUR")
+  CMD+=(--text_min_confidence "$TEXT_MIN_CONFIDENCE")
+  CMD+=(--text_min_area "$TEXT_MIN_AREA")
+  CMD+=(--easyocr_langs "$EASYOCR_LANGS")
+  CMD+=(--easyocr_text_threshold "$EASYOCR_TEXT_THRESHOLD")
+  CMD+=(--easyocr_low_text "$EASYOCR_LOW_TEXT")
+  CMD+=(--easyocr_link_threshold "$EASYOCR_LINK_THRESHOLD")
+  CMD+=(--easyocr_canvas_size "$EASYOCR_CANVAS_SIZE")
+  CMD+=(--easyocr_mag_ratio "$EASYOCR_MAG_RATIO")
+  if [ "$SAVE_TEXT_MASK" = true ]; then
+    CMD+=(--save_text_mask)
+  fi
+  if [ -n "$TEXT_DEBUG_DIR" ]; then
+    CMD+=(--text_debug_dir "$TEXT_DEBUG_DIR")
+  fi
 fi
 
 # MANIQA
@@ -276,6 +342,9 @@ echo "STEPS=$STEPS"
 echo "CFG_SCALE=$CFG_SCALE"
 echo "START_POINT_TYPE=$START_POINT_TYPE"
 echo "PRECISION=$PRECISION"
+echo "STAGE1_MODEL=$STAGE1_MODEL"
+echo "STAGE1_CKPT=$STAGE1_CKPT"
+echo "STAGE1_CONFIG=$STAGE1_CONFIG"
 echo "CLEANER_TYPE=$CLEANER_TYPE"
 echo "RESTORMER_REPO=$RESTORMER_REPO"
 echo "RESTORMER_TASK=$RESTORMER_TASK"
@@ -299,6 +368,27 @@ echo "G_WEIGHT_MODE=$G_WEIGHT_MODE"
 echo "G_WEIGHT_FLOOR=$G_WEIGHT_FLOOR"
 echo "G_WEIGHT_GAMMA=$G_WEIGHT_GAMMA"
 echo "G_BLOCK_SIZE=$G_BLOCK_SIZE"
+echo "TEXT_GUIDANCE=$TEXT_GUIDANCE"
+echo "TEXT_DETECTOR=$TEXT_DETECTOR"
+echo "TEXT_MASK_SOURCE=$TEXT_MASK_SOURCE"
+echo "TEXT_GUIDANCE_SCALE=$TEXT_GUIDANCE_SCALE"
+echo "TEXT_RGB_WEIGHT=$TEXT_RGB_WEIGHT"
+echo "TEXT_EDGE_WEIGHT=$TEXT_EDGE_WEIGHT"
+echo "TEXT_GUIDANCE_START=$TEXT_GUIDANCE_START"
+echo "TEXT_GUIDANCE_STOP=$TEXT_GUIDANCE_STOP"
+echo "TEXT_GUIDANCE_MODE=$TEXT_GUIDANCE_MODE"
+echo "TEXT_GRAD_CLIP=$TEXT_GRAD_CLIP"
+echo "TEXT_MASK_DILATE=$TEXT_MASK_DILATE"
+echo "TEXT_MASK_BLUR=$TEXT_MASK_BLUR"
+echo "TEXT_MIN_CONFIDENCE=$TEXT_MIN_CONFIDENCE"
+echo "TEXT_MIN_AREA=$TEXT_MIN_AREA"
+echo "EASYOCR_LANGS=$EASYOCR_LANGS"
+echo "EASYOCR_TEXT_THRESHOLD=$EASYOCR_TEXT_THRESHOLD"
+echo "EASYOCR_LOW_TEXT=$EASYOCR_LOW_TEXT"
+echo "EASYOCR_LINK_THRESHOLD=$EASYOCR_LINK_THRESHOLD"
+echo "EASYOCR_CANVAS_SIZE=$EASYOCR_CANVAS_SIZE"
+echo "EASYOCR_MAG_RATIO=$EASYOCR_MAG_RATIO"
+echo "SAVE_TEXT_MASK=$SAVE_TEXT_MASK"
 echo "EVAL_MANIQA=$EVAL_MANIQA"
 echo "MANIQA_MODEL=$MANIQA_MODEL"
 echo "EVAL_LPIPS=$EVAL_LPIPS"

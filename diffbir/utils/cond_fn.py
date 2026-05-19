@@ -2,6 +2,8 @@ from typing import overload, Tuple, Optional
 import torch
 from torch.nn import functional as F
 
+from .text_guidance import compute_text_guidance_loss
+
 
 class Guidance:
 
@@ -24,6 +26,7 @@ class Guidance:
         self.target_latent = None       # latent target, usually clean cond["c_img"]
         self.space = space
         self.repeat = repeat
+        self.text_guidance = None
 
     def load_target(
         self,
@@ -203,3 +206,82 @@ class WeightedMSEGuidance(Guidance):
             loss = ((pred_x0 - target_x0).pow(2) * w).mean((1, 2, 3)).sum()
         g = -torch.autograd.grad(loss, pred_x0)[0] * self.scale
         return g, loss.item()
+
+
+class TextGuidance:
+
+    def __init__(
+        self,
+        scale: float = 0.3,
+        rgb_weight: float = 0.1,
+        edge_weight: float = 1.0,
+        start: float = 0.0,
+        stop: float = 0.35,
+        mode: str = "late",
+        grad_clip: float = 0.05,
+        loss_type: str = "charbonnier",
+    ) -> "TextGuidance":
+        if mode not in ["late", "early", "all", "fraction"]:
+            raise ValueError(
+                f"Unsupported text guidance mode: {mode}. "
+                "Choose from ['late', 'early', 'all', 'fraction']."
+            )
+        self.scale = float(scale) * 3000.0
+        self.rgb_weight = float(rgb_weight)
+        self.edge_weight = float(edge_weight)
+        self.start = float(start)
+        self.stop = float(stop)
+        self.mode = mode
+        self.grad_clip = float(grad_clip)
+        self.loss_type = loss_type
+        self.target = None
+        self.mask = None
+        self.active_indices = []
+
+    def load_target(self, target: torch.Tensor, mask: torch.Tensor) -> None:
+        self.target = target
+        self.mask = mask
+
+    def configure_steps(self, total_steps: int) -> None:
+        if total_steps <= 0:
+            self.active_indices = []
+            return
+
+        start_idx = int(round(self.start * total_steps))
+        stop_idx = int(round(self.stop * total_steps))
+        start_idx = max(0, min(total_steps, start_idx))
+        stop_idx = max(0, min(total_steps, stop_idx))
+
+        if self.mode == "all":
+            active = range(total_steps)
+        elif self.mode == "early":
+            lo, hi = sorted((start_idx, stop_idx))
+            active = range(lo, hi)
+        else:
+            # The sampler iterates from high noise to low noise. "late" selects
+            # the final fraction of denoising steps, e.g. start=0.0, stop=0.35
+            # activates the last 35% of indices.
+            lo = total_steps - max(start_idx, stop_idx)
+            hi = total_steps - min(start_idx, stop_idx)
+            active = range(max(0, lo), min(total_steps, hi))
+        self.active_indices = list(active)
+        print(f"[TextGuidance] active step indices: {self.active_indices}")
+
+    def should_apply(self, step_index: int) -> bool:
+        if self.scale == 0:
+            return False
+        if self.target is None or self.mask is None:
+            return False
+        if self.mask.sum().item() <= 0:
+            return False
+        return step_index in set(self.active_indices)
+
+    def loss(self, pred_rgb: torch.Tensor) -> torch.Tensor:
+        return compute_text_guidance_loss(
+            pred_rgb,
+            self.target.to(device=pred_rgb.device, dtype=pred_rgb.dtype),
+            self.mask.to(device=pred_rgb.device, dtype=pred_rgb.dtype),
+            rgb_weight=self.rgb_weight,
+            edge_weight=self.edge_weight,
+            loss_type=self.loss_type,
+        )

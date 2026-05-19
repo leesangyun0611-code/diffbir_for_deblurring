@@ -1,4 +1,5 @@
 from typing import overload, Tuple
+import os
 import time
 
 import torch
@@ -19,6 +20,12 @@ from .utils.common import (
     trace_vram_usage,
     make_tiled_fn,
     VRAMPeakMonitor,
+)
+from .utils.text_detection import (
+    build_text_detector,
+    polygons_to_mask,
+    postprocess_text_mask,
+    save_text_mask_debug,
 )
 from .model import ControlLDM, Diffusion, RRDBNet
 
@@ -71,6 +78,28 @@ class Pipeline:
         self.cond_fn = cond_fn
         self.device = device
         self.output_size: Tuple[int, int] = None
+        self.text_args = None
+        self.text_detector = None
+        self.text_debug_stem = None
+
+    def configure_text_guidance(self, args) -> None:
+        self.text_args = args
+        if not getattr(args, "text_guidance", False):
+            return
+        self.text_detector = build_text_detector(
+            args.text_detector,
+            langs=[x.strip() for x in args.easyocr_langs.split(",") if x.strip()],
+            text_min_confidence=args.text_min_confidence,
+            easyocr_text_threshold=args.easyocr_text_threshold,
+            easyocr_low_text=args.easyocr_low_text,
+            easyocr_link_threshold=args.easyocr_link_threshold,
+            easyocr_canvas_size=args.easyocr_canvas_size,
+            easyocr_mag_ratio=args.easyocr_mag_ratio,
+        )
+        print(f"[TextGuidance] detector backend: {args.text_detector}")
+        print(f"[TextGuidance] selected Stage 1 model: {getattr(args, 'stage1_model', 'default')}")
+        print(f"[TextGuidance] Stage 1 checkpoint: {getattr(args, 'stage1_ckpt', '')}")
+        print(f"[TextGuidance] Stage 1 config: {getattr(args, 'stage1_config', '')}")
 
     def set_output_size(self, lq_size: Tuple[int]) -> None:
         h, w = lq_size[2:]
@@ -255,6 +284,103 @@ class Pipeline:
         self.cldm.control_scales = control_scales
         return x
 
+    def _tensor_to_uint8_rgb(self, x: torch.Tensor) -> np.ndarray:
+        x = x.detach().float().clamp(0, 1)
+        x = (x[0].permute(1, 2, 0).cpu().numpy() * 255.0).round()
+        return x.clip(0, 255).astype(np.uint8)
+
+    def _prepare_text_guidance(self, lq_tensor: torch.Tensor, cond_img: torch.Tensor) -> None:
+        if self.cond_fn is None:
+            return
+        text_guidance = getattr(self.cond_fn, "text_guidance", None)
+        if text_guidance is None:
+            return
+        if lq_tensor.size(0) != 1 or cond_img.size(0) != 1:
+            raise NotImplementedError("Text guidance currently supports batch_size=1.")
+
+        args = self.text_args
+        if self.text_detector is None:
+            raise RuntimeError("Text guidance is enabled but text detector is not configured.")
+
+        lq_for_mask = F.interpolate(
+            lq_tensor,
+            size=cond_img.shape[-2:],
+            mode="bicubic",
+            antialias=True,
+        ).clamp(0, 1)
+        lq_np = self._tensor_to_uint8_rgb(lq_for_mask)
+        stage1_np = self._tensor_to_uint8_rgb(cond_img)
+
+        lq_detections = []
+        stage1_detections = []
+        if args.text_mask_source in ["lq", "union"]:
+            lq_detections = self.text_detector.detect(lq_np, source="lq")
+        if args.text_mask_source in ["stage1", "union"]:
+            stage1_detections = self.text_detector.detect(stage1_np, source="stage1")
+
+        detections = lq_detections + stage1_detections
+        polygons = [det["polygon"] for det in detections]
+        binary_mask = polygons_to_mask(
+            polygons,
+            stage1_np.shape,
+            min_area=args.text_min_area,
+        )
+        soft_mask = postprocess_text_mask(
+            binary_mask,
+            dilate=args.text_mask_dilate,
+            blur=args.text_mask_blur,
+        )
+
+        mask_tensor = (
+            torch.from_numpy(soft_mask)
+            .to(device=cond_img.device, dtype=cond_img.dtype)
+            .unsqueeze(0)
+            .unsqueeze(0)
+        )
+        text_guidance.load_target(cond_img.detach() * 2 - 1, mask_tensor.detach())
+
+        nonzero_ratio = float((soft_mask > 0).mean())
+        print(f"[TextGuidance] LQ detections: {len(lq_detections)}")
+        print(f"[TextGuidance] Stage 1 detections: {len(stage1_detections)}")
+        print(f"[TextGuidance] final union detections: {len(detections)}")
+        print(f"[TextGuidance] mask nonzero ratio: {nonzero_ratio:.6f}")
+
+        if getattr(args, "save_text_mask", False):
+            base_debug_dir = (
+                args.text_debug_dir
+                if getattr(args, "text_debug_dir", None)
+                else os.path.join(args.output, "text_guidance_debug")
+            )
+            debug_dir = base_debug_dir
+            if self.text_debug_stem:
+                debug_dir = os.path.join(base_debug_dir, self.text_debug_stem)
+            save_text_mask_debug(
+                debug_dir,
+                lq_np,
+                stage1_np,
+                binary_mask,
+                soft_mask,
+                detections,
+                {
+                    "text_guidance": True,
+                    "text_detector": args.text_detector,
+                    "text_mask_source": args.text_mask_source,
+                    "text_guidance_scale": args.text_guidance_scale,
+                    "text_rgb_weight": args.text_rgb_weight,
+                    "text_edge_weight": args.text_edge_weight,
+                    "text_guidance_start": args.text_guidance_start,
+                    "text_guidance_stop": args.text_guidance_stop,
+                    "text_guidance_mode": args.text_guidance_mode,
+                    "text_grad_clip": args.text_grad_clip,
+                    "text_mask_dilate": args.text_mask_dilate,
+                    "text_mask_blur": args.text_mask_blur,
+                    "text_min_confidence": args.text_min_confidence,
+                    "text_min_area": args.text_min_area,
+                    "easyocr_langs": args.easyocr_langs,
+                },
+            )
+            print(f"[TextGuidance] saved debug masks to {debug_dir}")
+
     @torch.no_grad()
     def run(
         self,
@@ -304,6 +430,7 @@ class Pipeline:
                 lq_tensor, cleaner_tiled, cleaner_tile_size, cleaner_tile_stride
             )
         tock(t, "stage1 cleaner")
+        self._prepare_text_guidance(lq_tensor, cond_img)
 
         assert all(x >= 512 for x in cond_img.shape[2:]), (
             "The resolution of stage-1 model output should be greater than 512, "

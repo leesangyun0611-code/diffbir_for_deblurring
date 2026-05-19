@@ -243,6 +243,29 @@ def parse_args() -> Namespace:
         help="Override stage-1 cleaner. Use 'restormer' to replace the default DiffBIR cleaner.",
     )
     parser.add_argument(
+        "--stage1_model",
+        type=str,
+        default="default",
+        choices=["default", "swinir", "nafnet", "restormer", "mprnet"],
+        help=(
+            "Stage-1 restoration selector. 'default' and 'swinir' preserve the "
+            "repo's built-in DiffBIR cleaner path; nafnet/restormer/mprnet map "
+            "to the existing cleaner_type adapters."
+        ),
+    )
+    parser.add_argument(
+        "--stage1_ckpt",
+        type=str,
+        default="",
+        help="Optional alias for the selected stage-1 adapter checkpoint.",
+    )
+    parser.add_argument(
+        "--stage1_config",
+        type=str,
+        default="",
+        help="Reserved optional stage-1 config path for future adapters.",
+    )
+    parser.add_argument(
         "--restormer_repo",
         type=str,
         default="third_party/Restormer",
@@ -482,6 +505,47 @@ def parse_args() -> Namespace:
         ),
     )
 
+    # text-aware guidance parameters
+    parser.add_argument("--text_guidance", action="store_true", help="Enable text-aware Stage 2 guidance.")
+    parser.add_argument("--text_detector", type=str, default="easyocr", choices=["easyocr", "none"])
+    parser.add_argument(
+        "--text_mask_source",
+        type=str,
+        default="union",
+        choices=["stage1", "lq", "union"],
+        help="Image source used to detect text regions.",
+    )
+    parser.add_argument("--text_guidance_scale", type=float, default=0.3)
+    parser.add_argument("--text_rgb_weight", type=float, default=0.1)
+    parser.add_argument("--text_edge_weight", type=float, default=1.0)
+    parser.add_argument("--text_guidance_start", type=float, default=0.0)
+    parser.add_argument("--text_guidance_stop", type=float, default=0.35)
+    parser.add_argument(
+        "--text_guidance_mode",
+        type=str,
+        default="late",
+        choices=["late", "early", "all", "fraction"],
+    )
+    parser.add_argument("--text_mask_dilate", type=int, default=5)
+    parser.add_argument("--text_mask_blur", type=float, default=1.0)
+    parser.add_argument("--text_min_confidence", type=float, default=0.3)
+    parser.add_argument("--text_min_area", type=float, default=0)
+    parser.add_argument("--easyocr_langs", type=str, default="ko,en")
+    parser.add_argument("--easyocr_text_threshold", type=float, default=0.4)
+    parser.add_argument("--easyocr_low_text", type=float, default=0.2)
+    parser.add_argument("--easyocr_link_threshold", type=float, default=0.4)
+    parser.add_argument("--easyocr_canvas_size", type=int, default=2560)
+    parser.add_argument("--easyocr_mag_ratio", type=float, default=2.0)
+    parser.add_argument("--save_text_mask", action="store_true")
+    parser.add_argument("--text_debug_dir", type=str, default="")
+    parser.add_argument("--text_grad_clip", type=float, default=0.05)
+    parser.add_argument(
+        "--text_guidance_loss",
+        type=str,
+        default="edge_rgb",
+        choices=["edge_rgb", "charbonnier", "l1", "mse"],
+    )
+
     # common parameters
     parser.add_argument(
         "--input",
@@ -568,6 +632,25 @@ def parse_args() -> Namespace:
 
 def main():
     args = parse_args()
+
+    if args.stage1_model in ["restormer", "nafnet", "mprnet"]:
+        args.cleaner_type = args.stage1_model
+    elif args.stage1_model == "swinir":
+        args.cleaner_type = "default"
+
+    if args.stage1_ckpt:
+        if args.cleaner_type == "restormer":
+            args.restormer_ckpt = args.stage1_ckpt
+        elif args.cleaner_type == "nafnet":
+            args.nafnet_ckpt = args.stage1_ckpt
+        elif args.cleaner_type == "mprnet":
+            args.mprnet_ckpt = args.stage1_ckpt
+
+    if args.text_guidance and args.sampler != "spaced":
+        print(
+            "[TextGuidance] Warning: text guidance is currently inserted in the "
+            "'spaced' sampler guidance path. Use --sampler spaced for text-aware guidance."
+        )
 
     if args.auto_resize_input:
         args.input, resized = maybe_resize_input_to_small(

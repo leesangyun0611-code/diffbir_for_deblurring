@@ -8,7 +8,7 @@ from .sampler import Sampler
 from ..model.gaussian_diffusion import extract_into_tensor
 from ..model.cldm import ControlLDM
 from ..utils.common import make_tiled_fn
-from ..utils.cond_fn import Guidance, WeightedMSEGuidance
+from ..utils.cond_fn import Guidance, TextGuidance, WeightedMSEGuidance
 
 
 def space_timesteps(num_timesteps, section_counts):
@@ -155,20 +155,36 @@ class SpacedSampler(Sampler):
         t_scalar = int(model_t[0].item())
         return (t_scalar < cond_fn.t_start) and (t_scalar > cond_fn.t_stop)
 
+    def _should_apply_any_guidance(
+        self,
+        cond_fn: Optional[Guidance],
+        model_t: torch.Tensor,
+        step_index: int,
+    ) -> bool:
+        if cond_fn is None:
+            return False
+        text_guidance = getattr(cond_fn, "text_guidance", None)
+        return self._should_apply_guidance(cond_fn, model_t) or (
+            text_guidance is not None and text_guidance.should_apply(step_index)
+        )
+
     def _apply_restoration_guidance(
         self,
         model: ControlLDM,
         pred_x0: torch.Tensor,
         model_t: torch.Tensor,
         cond_fn: Optional[Guidance],
+        step_index: int,
         guidance_decoder_tiled: bool = False,
         guidance_decoder_tile_size: int = -1,
     ) -> torch.Tensor:
-        if not self._should_apply_guidance(cond_fn, model_t):
+        if not self._should_apply_any_guidance(cond_fn, model_t, step_index):
             return pred_x0
 
         out = pred_x0
         t_scalar = int(model_t[0].item())
+        use_restoration_guidance = self._should_apply_guidance(cond_fn, model_t)
+        text_guidance: Optional[TextGuidance] = getattr(cond_fn, "text_guidance", None)
 
         # weighted MSE guidance is defined in RGB space
         use_rgb_guidance = (cond_fn.space == "rgb") or isinstance(
@@ -176,14 +192,14 @@ class SpacedSampler(Sampler):
         )
 
         for _ in range(cond_fn.repeat):
-            if not use_rgb_guidance:
+            if use_restoration_guidance and not use_rgb_guidance:
                 target_latent = getattr(cond_fn, "target_latent", None)
                 if target_latent is None:
                     raise ValueError("Guidance target_latent is not set.")
 
                 g, _ = cond_fn(target_latent, out, t_scalar)
                 out = out + g
-            else:
+            elif use_restoration_guidance:
                 if cond_fn.target is None:
                     raise ValueError("Guidance RGB target is not set.")
 
@@ -215,6 +231,28 @@ class SpacedSampler(Sampler):
 
                 out = out + g
 
+            if text_guidance is not None and text_guidance.should_apply(step_index):
+                with torch.enable_grad():
+                    z = out.detach().clone().float().requires_grad_(True)
+                    with torch.autocast(device_type=z.device.type, enabled=False):
+                        pred_rgb = model.vae_decode(
+                            z,
+                            guidance_decoder_tiled,
+                            guidance_decoder_tile_size,
+                        ).float()
+                        loss = text_guidance.loss(pred_rgb)
+
+                    g = -torch.autograd.grad(loss, z)[0] * float(text_guidance.scale)
+                    if text_guidance.grad_clip > 0:
+                        g = g.clamp(-text_guidance.grad_clip, text_guidance.grad_clip)
+                    grad_max = float(g.detach().abs().max().item())
+                    print(
+                        f"[TextGuidance] step={step_index} t={t_scalar} "
+                        f"loss={float(loss.detach().item()):.6f} grad_max={grad_max:.6f}"
+                    )
+
+                out = out + g
+
         return out
 
     @torch.no_grad()
@@ -228,6 +266,7 @@ class SpacedSampler(Sampler):
         uncond: Optional[Dict[str, torch.Tensor]],
         cfg_scale: float,
         cond_fn: Optional[Guidance] = None,
+        step_index: int = -1,
         guidance_decoder_tiled: bool = False,
         guidance_decoder_tile_size: int = -1,
     ) -> torch.Tensor:
@@ -243,6 +282,7 @@ class SpacedSampler(Sampler):
             pred_x0=pred_x0,
             model_t=model_t,
             cond_fn=cond_fn,
+            step_index=step_index,
             guidance_decoder_tiled=guidance_decoder_tiled,
             guidance_decoder_tile_size=guidance_decoder_tile_size,
         )
@@ -275,6 +315,8 @@ class SpacedSampler(Sampler):
     ) -> torch.Tensor:
         self.make_schedule(steps)
         self.to(device)
+        if cond_fn is not None and getattr(cond_fn, "text_guidance", None) is not None:
+            cond_fn.text_guidance.configure_steps(steps)
 
         if tiled:
             forward = model.forward
@@ -315,6 +357,7 @@ class SpacedSampler(Sampler):
                 uncond,
                 cur_cfg_scale,
                 cond_fn=cond_fn,
+                step_index=i,
                 guidance_decoder_tiled=guidance_decoder_tiled,
                 guidance_decoder_tile_size=guidance_decoder_tile_size,
             )

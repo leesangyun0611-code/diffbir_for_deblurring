@@ -16,7 +16,7 @@ from ..utils.common import (
 )
 from .pretrained_models import MODELS
 from ..pipeline import Pipeline
-from ..utils.cond_fn import MSEGuidance, WeightedMSEGuidance
+from ..utils.cond_fn import MSEGuidance, TextGuidance, WeightedMSEGuidance
 from ..model import ControlLDM, Diffusion
 from ..model.lora import load_lora_checkpoint
 from ..utils.caption import (
@@ -43,6 +43,8 @@ class InferenceLoop:
             self.load_cldm()
         self.load_cond_fn()
         self.load_pipeline()
+        if hasattr(self.pipeline, "configure_text_guidance"):
+            self.pipeline.configure_text_guidance(self.args)
         with VRAMPeakMonitor("loading captioner"):
             self.load_captioner()
 
@@ -106,11 +108,13 @@ class InferenceLoop:
         self.diffusion.to(self.args.device)
 
     def load_cond_fn(self) -> None:
-        if not self.args.guidance:
+        if not self.args.guidance and not getattr(self.args, "text_guidance", False):
             self.cond_fn = None
             return
 
-        if self.args.g_loss == "mse":
+        if not self.args.guidance:
+            self.cond_fn = MSEGuidance(0.0, 1001, -1, "rgb", 1)
+        elif self.args.g_loss == "mse":
             self.cond_fn = MSEGuidance(
                 self.args.g_scale,
                 self.args.g_start,
@@ -132,6 +136,33 @@ class InferenceLoop:
             )
         else:
             raise ValueError(self.args.g_loss)
+
+        if getattr(self.args, "text_guidance", False):
+            loss_type = "charbonnier"
+            if getattr(self.args, "text_guidance_loss", "edge_rgb") in [
+                "charbonnier",
+                "l1",
+                "mse",
+            ]:
+                loss_type = self.args.text_guidance_loss
+            self.cond_fn.text_guidance = TextGuidance(
+                scale=self.args.text_guidance_scale,
+                rgb_weight=self.args.text_rgb_weight,
+                edge_weight=self.args.text_edge_weight,
+                start=self.args.text_guidance_start,
+                stop=self.args.text_guidance_stop,
+                mode=self.args.text_guidance_mode,
+                grad_clip=self.args.text_grad_clip,
+                loss_type=loss_type,
+            )
+            print(
+                "[TextGuidance] enabled: "
+                f"detector={self.args.text_detector}, "
+                f"mask_source={self.args.text_mask_source}, "
+                f"scale={self.args.text_guidance_scale}, "
+                f"rgb_weight={self.args.text_rgb_weight}, "
+                f"edge_weight={self.args.text_edge_weight}"
+            )
 
     @overload
     def load_pipeline(self) -> None: ...
@@ -277,6 +308,8 @@ class InferenceLoop:
 
             for i in range(num_batches):
                 n_inputs = min((i + 1) * batch_size, n_samples) - i * batch_size
+                if hasattr(self.pipeline, "text_debug_stem"):
+                    self.pipeline.text_debug_stem = self.loop_ctx["file_stem"]
                 with torch.autocast(self.args.device, auto_cast_type):
                     batch_samples = self.pipeline.run(
                         np.tile(lq[None], (n_inputs, 1, 1, 1)),

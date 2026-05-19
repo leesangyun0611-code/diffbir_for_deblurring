@@ -1,4 +1,5 @@
 import numpy as np
+import torch
 from PIL import Image
 from omegaconf import OmegaConf
 
@@ -45,6 +46,18 @@ class BIDInferenceLoop(InferenceLoop):
             )
             self.cleaner.eval().to(self.args.device)
             return
+        if getattr(self.args, "stage1_model", "default") == "swinir":
+            config = self.args.stage1_config or "configs/inference/swinir.yaml"
+            weight = self.args.stage1_ckpt or (
+                MODELS["swinir_general"]
+                if self.args.version == "v1"
+                else MODELS["swinir_realesrgan"]
+            )
+            self.cleaner: SwinIR = instantiate_from_config(OmegaConf.load(config))
+            model_weight = load_model_from_url(weight) if weight.startswith("http") else torch.load(weight, map_location="cpu")
+            self.cleaner.load_state_dict(model_weight, strict=True)
+            self.cleaner.eval().to(self.args.device)
+            return
 
         if self.args.version == "v1":
             config = "configs/inference/swinir.yaml"
@@ -67,6 +80,8 @@ class BIDInferenceLoop(InferenceLoop):
             pipeline_class = NAFNetPipeline
         elif getattr(self.args, "cleaner_type", "default") == "mprnet":
             pipeline_class = MPRNetPipeline
+        elif getattr(self.args, "stage1_model", "default") == "swinir":
+            pipeline_class = SwinIRPipeline
         elif self.args.version == "v1":
             pipeline_class = SwinIRPipeline
         elif self.args.version in ["v2", "v2.1"]:

@@ -1,4 +1,5 @@
 import numpy as np
+import torch
 from PIL import Image
 from omegaconf import OmegaConf
 
@@ -46,6 +47,18 @@ class BSRInferenceLoop(InferenceLoop):
             )
             self.cleaner.eval().to(self.args.device)
             return
+        if getattr(self.args, "stage1_model", "default") == "swinir":
+            config = self.args.stage1_config or "configs/inference/swinir.yaml"
+            weight = self.args.stage1_ckpt or (
+                MODELS["swinir_general"]
+                if self.args.version == "v1"
+                else MODELS["swinir_realesrgan"]
+            )
+            self.cleaner: SwinIR = instantiate_from_config(OmegaConf.load(config))
+            model_weight = load_model_from_url(weight) if weight.startswith("http") else torch.load(weight, map_location="cpu")
+            self.cleaner.load_state_dict(model_weight, strict=True)
+            self.cleaner.eval().to(self.args.device)
+            return
 
         if self.args.version == "v1":
             config = "configs/inference/swinir.yaml"
@@ -89,6 +102,15 @@ class BSRInferenceLoop(InferenceLoop):
                 self.args.device,
             )
             return
+        if getattr(self.args, "stage1_model", "default") == "swinir":
+            self.pipeline = SwinIRPipeline(
+                self.cleaner,
+                self.cldm,
+                self.diffusion,
+                self.cond_fn,
+                self.args.device,
+            )
+            return
 
         if self.args.version == "v1":
             self.pipeline = SwinIRPipeline(
@@ -113,6 +135,7 @@ class BSRInferenceLoop(InferenceLoop):
     def after_load_lq(self, lq: Image.Image) -> np.ndarray:
         if (
             self.args.version == "v1"
+            or getattr(self.args, "stage1_model", "default") == "swinir"
             or getattr(self.args, "cleaner_type", "default") in ["restormer", "nafnet", "mprnet"]
         ):
             lq = lq.resize(
