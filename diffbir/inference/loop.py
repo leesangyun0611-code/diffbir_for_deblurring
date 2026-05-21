@@ -417,9 +417,10 @@ class InferenceLoop:
             else:
                 iqa_df.to_csv(iqa_csv_path, index=None)
 
-            avg_maniqa = iqa_df["maniqa"].mean()
             print("============================================================")
-            print(f"Average MANIQA (current image batch): {avg_maniqa:.6f}")
+            if "maniqa" in iqa_df.columns:
+                avg_maniqa = iqa_df["maniqa"].mean()
+                print(f"Average MANIQA (current image batch): {avg_maniqa:.6f}")
 
             if "lpips" in iqa_df.columns:
                 avg_lpips = iqa_df["lpips"].mean()

@@ -2,82 +2,95 @@
 set -eo pipefail
 
 # ==========================================
-# DiffBIR single experiment launcher
-# Run with: bash diffbir.sh
+# DiffBIR experiment launcher
+# EXPERIMENT=1: exp3_ baseline Stage2
+# EXPERIMENT=2: exp4_ Stage2 + text guidance
+# EXPERIMENT=3: exp5_ Stage2 non-text + Stage1 text blend
 # ==========================================
 
-# ---------- Device ----------
-GPU=${GPU:-0}
-DEVICE=${DEVICE:-cuda}                 # cpu / cuda / mps
-PRECISION=${PRECISION:-fp16}           # fp32 / fp16 / bf16
-SEED=${SEED:-42}
+# ---------- Core ----------
+EXPERIMENT=${EXPERIMENT:-3}            # 실험 선택, options: 1=baseline Stage2 / 2=text guidance / 3=Stage1 text blend
+GPU=${GPU:-1}                          # 사용할 GPU id, 예: 0 / 1
+DEVICE=${DEVICE:-cuda}                 # 실행 device, options: cuda / cpu / mps
+PRECISION=${PRECISION:-fp16}           # 연산 precision, options: fp16 / fp32 / bf16
+SEED=${SEED:-42}                       # random seed, 결과 재현성 제어
 
-# ---------- Current experiment ----------
-EXPERIMENT_NAME=${EXPERIMENT_NAME:-text_guidance_test}
-TASK=${TASK:-sr}                       # sr / face / denoise / unaligned_face
-GUIDANCE=${GUIDANCE:-false}            # true / false
-G_LOSS=${G_LOSS:-w_mse}                # mse / w_mse
-G_SCALE=${G_SCALE:-0.0}
-G_SPACE=${G_SPACE:-rgb}                # latent / rgb
-G_WEIGHT_MODE=${G_WEIGHT_MODE:-highfreq} # lowfreq / highfreq
-G_WEIGHT_GAMMA=${G_WEIGHT_GAMMA:-1.0}
+INPUT_DIR=${INPUT:-${INPUT_DIR:-inputs/demo/test_image_text}} # input image folder
+GT_DIR=${GT_DIR:-GT/test_image_text_GT} # GT folder, PSNR/SSIM/LPIPS 평가용
+RESULTS_DIR=${RESULTS_DIR:-results}    # 결과 root directory
 
-# ---------- Task / version ----------
-VERSION=${VERSION:-v2.1}               # v1 / v2 / v2.1 / custom
-UPSCALE=${UPSCALE:-1}
+TASK=${TASK:-sr}                       # DiffBIR task, options: sr / denoise / face / unaligned_face
+VERSION=${VERSION:-v2.1}               # DiffBIR version, options: v1 / v2 / v2.1
+UPSCALE=${UPSCALE:-1}                  # SR upscale factor
+STAGE1_MODEL=${STAGE1_MODEL:-restormer} # Stage1 restoration model, options: default / swinir / restormer / nafnet / mprnet
 
-# ---------- Paths ----------
-INPUT_DIR=${INPUT:-${INPUT_DIR:-inputs/demo/mytest}}
-GT_DIR=${GT_DIR:-}
-RESULTS_ROOT=${RESULTS_ROOT:-results}
-OUTPUT_DIR="${RESULTS_ROOT}/${EXPERIMENT_NAME}"
-OUTPUT_DIR=${OUTPUT:-${OUTPUT_DIR:-results/text_guidance_test}}
+SAMPLER=${SAMPLER:-spaced}             # Stage2 sampler, text guidance는 현재 spaced에서 적용
+STEPS=${STEPS:-50}                     # denoising steps, 클수록 느림
+CFG_SCALE=${CFG_SCALE:-3}              # prompt guidance scale, 낮추면 hallucination 감소 가능
+START_POINT_TYPE=${START_POINT_TYPE:-cond} # Stage2 start point, options: cond / noise
+STRENGTH=${STRENGTH:-1.0}              # ControlNet strength, 낮추면 Stage2 자유도 감소
 
-# ---------- Optional input resize ----------
-AUTO_RESIZE=${AUTO_RESIZE:-false}      # true / false
-MAX_INPUT_SIDE=${MAX_INPUT_SIDE:-511}  # only used when AUTO_RESIZE=true
+# ---------- Existing restoration guidance ----------
+GUIDANCE=${GUIDANCE:-true}             # 기존 Restoration Guidance 사용 여부, options: true / false
+G_LOSS=${G_LOSS:-w_mse}                # restoration guidance loss, options: mse / w_mse
+G_SCALE=${G_SCALE:-1.0}                # restoration guidance strength
+G_SPACE=${G_SPACE:-rgb}                # guidance 계산 space, options: rgb / latent
+G_WEIGHT_MODE=${G_WEIGHT_MODE:-highfreq} # w_mse weight 방향, options: highfreq / lowfreq
+G_WEIGHT_GAMMA=${G_WEIGHT_GAMMA:-1.0}  # w_mse weight contrast, 클수록 weight 차이 증가
+G_REPEAT=${G_REPEAT:-1}                # step당 guidance update 반복 횟수, 클수록 느림
 
-# ---------- Sampling ----------
-SAMPLER=${SAMPLER:-spaced}             # spaced / ddim / dpm++_m2 / edm_euler / ...
-STEPS=${STEPS:-50}
-CFG_SCALE=${CFG_SCALE:-4}
-RESCALE_CFG=${RESCALE_CFG:-false}      # true / false
+# ---------- Text guidance for EXPERIMENT=2, optional in EXPERIMENT=3 ----------
+TEXT_GUIDANCE_SCALE=${TEXT_GUIDANCE_SCALE:-1.5} # text guidance 전체 strength
+TEXT_RGB_WEIGHT=${TEXT_RGB_WEIGHT:-1.5} # text RGB/color consistency weight
+TEXT_EDGE_WEIGHT=${TEXT_EDGE_WEIGHT:-4.0} # text stroke/edge consistency weight
+TEXT_GUIDANCE_MODE=${TEXT_GUIDANCE_MODE:-all} # text guidance schedule, options: all / late / early / fraction
+TEXT_GUIDANCE_STOP=${TEXT_GUIDANCE_STOP:-1.0} # schedule fraction, all에서는 1.0 유지
+TEXT_GRAD_CLIP=${TEXT_GRAD_CLIP:-0.10} # text gradient clipping, 과보정/NaN 방지
 
-# ---------- Start point ----------
-START_POINT_TYPE=${START_POINT_TYPE:-cond} # cond / noise
-START_POINT_NOISE_SCALE=${START_POINT_NOISE_SCALE:-} # e.g. 0.3, 1.0 ; leave empty to disable
+TEXT_REGIONAL_NOISE=${TEXT_REGIONAL_NOISE:-true} # text/non-text 시작 noise 분리, options: true / false
+TEXT_NOISE_TIMESTEP_RATIO=${TEXT_NOISE_TIMESTEP_RATIO:-0.05} # text region start noise timestep ratio, 낮을수록 Stage1 text 보존
+NONTEXT_NOISE_TIMESTEP_RATIO=${NONTEXT_NOISE_TIMESTEP_RATIO:-1.0} # non-text start noise ratio, 1.0이면 기존 full-noise
+TEXT_NOISE_SCALE=${TEXT_NOISE_SCALE:-0.5} # text region random noise scale, 낮을수록 text 보존
+NONTEXT_NOISE_SCALE=${NONTEXT_NOISE_SCALE:-1.0} # non-text random noise scale
 
-# ---------- Batch / outputs ----------
-N_SAMPLES=${N_SAMPLES:-1}
-BATCH_SIZE=${BATCH_SIZE:-1}
+TEXT_LATENT_ANCHOR=${TEXT_LATENT_ANCHOR:-true} # 매 step 후 text latent를 Stage1 latent에 anchoring, options: true / false
+TEXT_LATENT_ANCHOR_ALPHA=${TEXT_LATENT_ANCHOR_ALPHA:-0.8} # anchoring strength, 1.0에 가까울수록 Stage1 text 유지
 
-# ---------- Prompt / caption ----------
-CAPTIONER=${CAPTIONER:-none}           # none / llava / ram
-POS_PROMPT=${POS_PROMPT:-"a sharp, clean, natural photo, no motion blur, high detail"}
-NEG_PROMPT=${NEG_PROMPT:-"motion blur, blurry, ghosting, smear, low quality, artifacts"}
+# ---------- Text detection ----------
+TEXT_SPOTTING_MODULE=${TEXT_SPOTTING_MODULE:-easyocr} # EXPERIMENT=2 text spotting backend, 현재 options: easyocr
+TEXT_MASK_SOURCE=${TEXT_MASK_SOURCE:-union} # mask source, options: union / stage1 / lq
+TEXT_MASK_DILATE=${TEXT_MASK_DILATE:-7} # text mask dilation pixel, 글자 주변까지 보호
+TEXT_MASK_BLUR=${TEXT_MASK_BLUR:-0.5}  # soft mask blur sigma, 경계 완화
+TEXT_MIN_CONFIDENCE=${TEXT_MIN_CONFIDENCE:-0.1} # EasyOCR confidence threshold, 낮을수록 recall 증가
+TEXT_MIN_AREA=${TEXT_MIN_AREA:-0}      # 최소 text polygon area, 작은 글자면 0 권장
+EASYOCR_LANGS=${EASYOCR_LANGS:-ko,en}  # EasyOCR language hints, 예: ko,en / en
+EASYOCR_TEXT_THRESHOLD=${EASYOCR_TEXT_THRESHOLD:-0.2} # EasyOCR text threshold, 낮을수록 흐린 글자 검출 증가
+EASYOCR_LOW_TEXT=${EASYOCR_LOW_TEXT:-0.1} # EasyOCR low_text threshold, 낮을수록 작은/약한 글자 검출 증가
+EASYOCR_LINK_THRESHOLD=${EASYOCR_LINK_THRESHOLD:-0.2} # EasyOCR character link threshold
+EASYOCR_CANVAS_SIZE=${EASYOCR_CANVAS_SIZE:-3200} # EasyOCR canvas size, 클수록 작은 글자 유리하지만 느림
+EASYOCR_MAG_RATIO=${EASYOCR_MAG_RATIO:-3.0} # EasyOCR magnification ratio, 클수록 작은 글자 유리하지만 느림
 
-# ---------- Tile toggles ----------
-CLEANER_TILED=${CLEANER_TILED:-false}
-CLDM_TILED=${CLDM_TILED:-false}
-VAE_ENCODER_TILED=${VAE_ENCODER_TILED:-false}
-VAE_DECODER_TILED=${VAE_DECODER_TILED:-false}
+# ---------- EXPERIMENT=3 text blend ----------
+EXP5_USE_TEXT_GUIDANCE=${EXP5_USE_TEXT_GUIDANCE:-false} # EXPERIMENT=3의 Stage2에도 text guidance 적용할지, options: true / false
+TEXT_BLEND_SPOTTING_MODULE=${TEXT_BLEND_SPOTTING_MODULE:-paddleocr} # EXPERIMENT=3 blend용 OCR backend, 현재 options: paddleocr
+TEXT_BLEND_DET_SOURCE=${TEXT_BLEND_DET_SOURCE:-stage1} # blend box 검출 source, options: stage1 / stage2
+TEXT_BLEND_OCR_LANGS=${TEXT_BLEND_OCR_LANGS:-korean,en} # PaddleOCR languages, 예: korean,en / en
+TEXT_BLEND_OCR_SCALE=${TEXT_BLEND_OCR_SCALE:-3.0} # OCR 입력 확대 배율, 작은 글자 검출용
+TEXT_BLEND_MIN_CONF=${TEXT_BLEND_MIN_CONF:-0.10} # PaddleOCR confidence threshold
+TEXT_BLEND_MIN_AREA=${TEXT_BLEND_MIN_AREA:-40} # 최소 box area, 작게 하면 작은 글자 recall 증가
+TEXT_BLEND_PAD_RATIO=${TEXT_BLEND_PAD_RATIO:-0.20} # box padding ratio, 글자 주변까지 Stage1 blend
+TEXT_BLEND_FEATHER=${TEXT_BLEND_FEATHER:-5} # blend mask feather radius, 경계 부드럽게
+TEXT_BLEND_USE_GPU_OCR=${TEXT_BLEND_USE_GPU_OCR:-false} # PaddleOCR GPU 사용 여부
 
-# ---------- Tile sizes / strides ----------
-CLEANER_TILE_SIZE=${CLEANER_TILE_SIZE:-512}
-CLEANER_TILE_STRIDE=${CLEANER_TILE_STRIDE:-256}
+# ---------- Metrics ----------
+EVAL_METRICS=${EVAL_METRICS:-true}     # PSNR/SSIM 평가, options: true / false
+RESIZE_PRED_TO_GT=${RESIZE_PRED_TO_GT:-false} # metric 전 pred를 GT 크기로 resize, options: true / false
+EVAL_MANIQA=${EVAL_MANIQA:-false}      # MANIQA 평가, options: true / false
+EVAL_LPIPS=${EVAL_LPIPS:-false}        # LPIPS 평가, options: true / false
+LPIPS_MODEL=${LPIPS_MODEL:-alex}       # LPIPS backbone, options: alex / vgg
+MANIQA_MODEL=${MANIQA_MODEL:-maniqa-pipal} # MANIQA model, options: maniqa / maniqa-kadid / maniqa-pipal
 
-CLDM_TILE_SIZE=${CLDM_TILE_SIZE:-256}
-CLDM_TILE_STRIDE=${CLDM_TILE_STRIDE:-128}
-
-VAE_ENCODER_TILE_SIZE=${VAE_ENCODER_TILE_SIZE:-1024}
-VAE_DECODER_TILE_SIZE=${VAE_DECODER_TILE_SIZE:-256}
-
-# ---------- Restormer stage-1 cleaner ----------
-# Roll back to the original stage-1 path with: STAGE1_MODEL=default
-STAGE1_MODEL=${STAGE1_MODEL:-swinir}   # options: default, swinir, nafnet, restormer, mprnet
-STAGE1_CKPT=${STAGE1_CKPT:-}
-STAGE1_CONFIG=${STAGE1_CONFIG:-}
-CLEANER_TYPE=${CLEANER_TYPE:-default} # legacy alias used by existing code
+# ---------- Less frequently changed paths/checkpoints ----------
 RESTORMER_REPO=${RESTORMER_REPO:-third_party/Restormer}
 RESTORMER_TASK=${RESTORMER_TASK:-Motion_Deblurring}
 RESTORMER_CKPT=${RESTORMER_CKPT:-${RESTORMER_REPO}/Motion_Deblurring/pretrained_models/motion_deblurring.pth}
@@ -85,388 +98,256 @@ NAFNET_REPO=${NAFNET_REPO:-third_party/NAFNet}
 NAFNET_CKPT=${NAFNET_CKPT:-weights/NAFNet-GoPro-width64.pth}
 MPRNET_REPO=${MPRNET_REPO:-third_party/MPRNet}
 MPRNET_CKPT=${MPRNET_CKPT:-weights/MPRNet-Deblurring.pth}
+STAGE1_CKPT=${STAGE1_CKPT:-}
 
-# ---------- Text-aware guidance ----------
-TEXT_GUIDANCE=${TEXT_GUIDANCE:-true}
-TEXT_DETECTOR=${TEXT_DETECTOR:-easyocr}
-TEXT_MASK_SOURCE=${TEXT_MASK_SOURCE:-union}
-TEXT_GUIDANCE_SCALE=${TEXT_GUIDANCE_SCALE:-0.3}
-TEXT_RGB_WEIGHT=${TEXT_RGB_WEIGHT:-0.1}
-TEXT_EDGE_WEIGHT=${TEXT_EDGE_WEIGHT:-1.0}
-TEXT_GUIDANCE_START=${TEXT_GUIDANCE_START:-0.0}
-TEXT_GUIDANCE_STOP=${TEXT_GUIDANCE_STOP:-0.35}
-TEXT_GUIDANCE_MODE=${TEXT_GUIDANCE_MODE:-late}
-TEXT_GRAD_CLIP=${TEXT_GRAD_CLIP:-0.05}
-TEXT_GUIDANCE_LOSS=${TEXT_GUIDANCE_LOSS:-edge_rgb}
-TEXT_MASK_DILATE=${TEXT_MASK_DILATE:-5}
-TEXT_MASK_BLUR=${TEXT_MASK_BLUR:-1.0}
-TEXT_MIN_CONFIDENCE=${TEXT_MIN_CONFIDENCE:-0.3}
-TEXT_MIN_AREA=${TEXT_MIN_AREA:-0}
-EASYOCR_LANGS=${EASYOCR_LANGS:-ko,en}
-EASYOCR_TEXT_THRESHOLD=${EASYOCR_TEXT_THRESHOLD:-0.4}
-EASYOCR_LOW_TEXT=${EASYOCR_LOW_TEXT:-0.2}
-EASYOCR_LINK_THRESHOLD=${EASYOCR_LINK_THRESHOLD:-0.4}
-EASYOCR_CANVAS_SIZE=${EASYOCR_CANVAS_SIZE:-2560}
-EASYOCR_MAG_RATIO=${EASYOCR_MAG_RATIO:-2.0}
-SAVE_TEXT_MASK=${SAVE_TEXT_MASK:-true}
-TEXT_DEBUG_DIR=${TEXT_DEBUG_DIR:-}
+CLEANER_TILED=${CLEANER_TILED:-false}
+CLDM_TILED=${CLDM_TILED:-false}
+VAE_ENCODER_TILED=${VAE_ENCODER_TILED:-false}
+VAE_DECODER_TILED=${VAE_DECODER_TILED:-false}
+CLEANER_TILE_SIZE=${CLEANER_TILE_SIZE:-512}
+CLEANER_TILE_STRIDE=${CLEANER_TILE_STRIDE:-256}
+CLDM_TILE_SIZE=${CLDM_TILE_SIZE:-256}
+CLDM_TILE_STRIDE=${CLDM_TILE_STRIDE:-128}
+VAE_ENCODER_TILE_SIZE=${VAE_ENCODER_TILE_SIZE:-1024}
+VAE_DECODER_TILE_SIZE=${VAE_DECODER_TILE_SIZE:-256}
 
-# ---------- Optional noise / sampler extras ----------
+N_SAMPLES=${N_SAMPLES:-1}
+BATCH_SIZE=${BATCH_SIZE:-1}
+CAPTIONER=${CAPTIONER:-none}
+POS_PROMPT=${POS_PROMPT:-"a sharp, clean, natural photo, no motion blur, high detail"}
+NEG_PROMPT=${NEG_PROMPT:-"motion blur, blurry, ghosting, smear, low quality, artifacts"}
 NOISE_AUG=${NOISE_AUG:-0}
 ETA=${ETA:-0}
 ORDER=${ORDER:-2}
-STRENGTH=${STRENGTH:-1.0}
 S_CHURN=${S_CHURN:-0}
 S_TMIN=${S_TMIN:-0}
 S_TMAX=${S_TMAX:-999}
 S_NOISE=${S_NOISE:-1.0}
 
-# ---------- Guidance shared options ----------
-G_START=${G_START:-1001}
-G_STOP=${G_STOP:-1}
-G_REPEAT=${G_REPEAT:-1}
-G_WEIGHT_FLOOR=${G_WEIGHT_FLOOR:-0.0}
-G_BLOCK_SIZE=${G_BLOCK_SIZE:-2}
+# ---------- Mode selection ----------
+case "$EXPERIMENT" in
+  1)
+    EXPERIMENT_NAME=${EXPERIMENT_NAME:-exp3_stage2_baseline}
+    TEXT_GUIDANCE=false
+    PRESERVE_TEXT=false
+    ;;
+  2)
+    EXPERIMENT_NAME=${EXPERIMENT_NAME:-exp4_text_guidance}
+    TEXT_GUIDANCE=true
+    PRESERVE_TEXT=false
+    ;;
+  3)
+    EXPERIMENT_NAME=${EXPERIMENT_NAME:-exp5_stage1_text_blend}
+    TEXT_GUIDANCE=$EXP5_USE_TEXT_GUIDANCE
+    PRESERVE_TEXT=true
+    ;;
+  *)
+    echo "[ERROR] EXPERIMENT must be 1, 2, or 3. Got: $EXPERIMENT"
+    exit 1
+    ;;
+esac
 
-# ---------- MANIQA evaluation ----------
-EVAL_MANIQA=${EVAL_MANIQA:-false}      # true / false
-MANIQA_MODEL=${MANIQA_MODEL:-maniqa-pipal} # maniqa / maniqa-kadid / maniqa-pipal
-IQA_CSV=${IQA_CSV:-iqa_results.csv}
+EXPERIMENT_DIR=${OUTPUT:-${RESULTS_DIR}/${EXPERIMENT_NAME}}
+RESULT_DIR=${EXPERIMENT_DIR}/result
+TEXT_DETECTION_DIR=${EXPERIMENT_DIR}/text_detection
+METRICS_DIR=${EXPERIMENT_DIR}/metrics
+STAGE2_RAW_DIR=${EXPERIMENT_DIR}/stage2_raw
+STAGE1_BLEND_DIR=${EXPERIMENT_DIR}/stage1
 
-# ---------- LPIPS evaluation ----------
-EVAL_LPIPS=${EVAL_LPIPS:-false}        # true / false
-LPIPS_MODEL=${LPIPS_MODEL:-alex}       # alex / vgg
-
-# ---------- GT-based metric evaluation ----------
-EVAL_METRICS=${EVAL_METRICS:-false}    # true / false
-RESIZE_PRED_TO_GT=${RESIZE_PRED_TO_GT:-false} # true / false
-METRICS_CSV=${METRICS_CSV:-metrics_psnr_ssim.csv}
-
-# ---------- Custom model paths (optional) ----------
-TRAIN_CFG=${TRAIN_CFG:-}
-CKPT=${CKPT:-}
-LORA_CKPT=${LORA_CKPT:-}
-
-# ==========================================
-# Build inference command
-# ==========================================
-CMD=(python inference.py)
-
-# Basic
-CMD+=(--task "$TASK")
-CMD+=(--version "$VERSION")
-CMD+=(--upscale "$UPSCALE")
-CMD+=(--input "$INPUT_DIR")
-CMD+=(--output "$OUTPUT_DIR")
-if [ "$EVAL_LPIPS" = true ] && [ -n "$GT_DIR" ]; then
-  CMD+=(--gt_dir "$GT_DIR")
+if [ "$PRESERVE_TEXT" = true ]; then
+  OUTPUT_DIR="$STAGE2_RAW_DIR"
+  FINAL_PRED_DIR="$RESULT_DIR"
+else
+  OUTPUT_DIR="$RESULT_DIR"
+  FINAL_PRED_DIR="$RESULT_DIR"
 fi
-CMD+=(--n_samples "$N_SAMPLES")
-CMD+=(--batch_size "$BATCH_SIZE")
-CMD+=(--sampler "$SAMPLER")
-CMD+=(--steps "$STEPS")
-CMD+=(--cfg_scale "$CFG_SCALE")
-CMD+=(--start_point_type "$START_POINT_TYPE")
-CMD+=(--captioner "$CAPTIONER")
-CMD+=(--precision "$PRECISION")
-CMD+=(--seed "$SEED")
-CMD+=(--device "$DEVICE")
 
-# Stage-1 cleaner selection
-CMD+=(--stage1_model "$STAGE1_MODEL")
-CMD+=(--cleaner_type "$CLEANER_TYPE")
+mkdir -p "$RESULT_DIR" "$TEXT_DETECTION_DIR" "$METRICS_DIR"
+
+# ---------- Build Stage2 command ----------
+CMD=(python inference.py)
+CMD+=(--task "$TASK" --version "$VERSION" --upscale "$UPSCALE")
+CMD+=(--input "$INPUT_DIR" --output "$OUTPUT_DIR")
+CMD+=(--n_samples "$N_SAMPLES" --batch_size "$BATCH_SIZE")
+CMD+=(--sampler "$SAMPLER" --steps "$STEPS" --cfg_scale "$CFG_SCALE")
+CMD+=(--start_point_type "$START_POINT_TYPE")
+CMD+=(--captioner "$CAPTIONER" --precision "$PRECISION" --seed "$SEED" --device "$DEVICE")
+CMD+=(--stage1_model "$STAGE1_MODEL" --cleaner_type default)
+
 if [ -n "$STAGE1_CKPT" ]; then
   CMD+=(--stage1_ckpt "$STAGE1_CKPT")
 fi
-if [ -n "$STAGE1_CONFIG" ]; then
-  CMD+=(--stage1_config "$STAGE1_CONFIG")
-fi
-if [ "$STAGE1_MODEL" = "restormer" ] || [ "$CLEANER_TYPE" = "restormer" ]; then
-  CMD+=(--restormer_repo "$RESTORMER_REPO")
-  CMD+=(--restormer_task "$RESTORMER_TASK")
+
+if [ "$STAGE1_MODEL" = "restormer" ]; then
+  CMD+=(--restormer_repo "$RESTORMER_REPO" --restormer_task "$RESTORMER_TASK")
   CMD+=(--restormer_ckpt "${STAGE1_CKPT:-$RESTORMER_CKPT}")
-elif [ "$STAGE1_MODEL" = "nafnet" ] || [ "$CLEANER_TYPE" = "nafnet" ]; then
-  CMD+=(--nafnet_repo "$NAFNET_REPO")
-  CMD+=(--nafnet_ckpt "${STAGE1_CKPT:-$NAFNET_CKPT}")
-elif [ "$STAGE1_MODEL" = "mprnet" ] || [ "$CLEANER_TYPE" = "mprnet" ]; then
-  CMD+=(--mprnet_repo "$MPRNET_REPO")
-  CMD+=(--mprnet_ckpt "${STAGE1_CKPT:-$MPRNET_CKPT}")
-fi
-
-# Optional input resize
-if [ "$AUTO_RESIZE" = true ]; then
-  CMD+=(--auto_resize_input)
-  CMD+=(--max_input_side "$MAX_INPUT_SIDE")
-fi
-
-# Optional booleans
-if [ "$RESCALE_CFG" = true ]; then
-  CMD+=(--rescale_cfg)
+elif [ "$STAGE1_MODEL" = "nafnet" ]; then
+  CMD+=(--nafnet_repo "$NAFNET_REPO" --nafnet_ckpt "${STAGE1_CKPT:-$NAFNET_CKPT}")
+elif [ "$STAGE1_MODEL" = "mprnet" ]; then
+  CMD+=(--mprnet_repo "$MPRNET_REPO" --mprnet_ckpt "${STAGE1_CKPT:-$MPRNET_CKPT}")
 fi
 
 if [ "$CLEANER_TILED" = true ]; then
-  CMD+=(--cleaner_tiled)
-  CMD+=(--cleaner_tile_size "$CLEANER_TILE_SIZE")
-  CMD+=(--cleaner_tile_stride "$CLEANER_TILE_STRIDE")
+  CMD+=(--cleaner_tiled --cleaner_tile_size "$CLEANER_TILE_SIZE" --cleaner_tile_stride "$CLEANER_TILE_STRIDE")
 fi
-
 if [ "$CLDM_TILED" = true ]; then
-  CMD+=(--cldm_tiled)
-  CMD+=(--cldm_tile_size "$CLDM_TILE_SIZE")
-  CMD+=(--cldm_tile_stride "$CLDM_TILE_STRIDE")
+  CMD+=(--cldm_tiled --cldm_tile_size "$CLDM_TILE_SIZE" --cldm_tile_stride "$CLDM_TILE_STRIDE")
 fi
-
 if [ "$VAE_ENCODER_TILED" = true ]; then
-  CMD+=(--vae_encoder_tiled)
-  CMD+=(--vae_encoder_tile_size "$VAE_ENCODER_TILE_SIZE")
+  CMD+=(--vae_encoder_tiled --vae_encoder_tile_size "$VAE_ENCODER_TILE_SIZE")
 fi
-
 if [ "$VAE_DECODER_TILED" = true ]; then
-  CMD+=(--vae_decoder_tiled)
-  CMD+=(--vae_decoder_tile_size "$VAE_DECODER_TILE_SIZE")
+  CMD+=(--vae_decoder_tiled --vae_decoder_tile_size "$VAE_DECODER_TILE_SIZE")
 fi
 
 if [ "$GUIDANCE" = true ]; then
-  CMD+=(--guidance)
-  CMD+=(--g_loss "$G_LOSS")
-  CMD+=(--g_scale "$G_SCALE")
-  CMD+=(--g_start "$G_START")
-  CMD+=(--g_stop "$G_STOP")
-  CMD+=(--g_space "$G_SPACE")
-  CMD+=(--g_repeat "$G_REPEAT")
-  CMD+=(--g_weight_mode "$G_WEIGHT_MODE")
-  CMD+=(--g_weight_floor "$G_WEIGHT_FLOOR")
-  CMD+=(--g_weight_gamma "$G_WEIGHT_GAMMA")
-  CMD+=(--g_block_size "$G_BLOCK_SIZE")
+  CMD+=(--guidance --g_loss "$G_LOSS" --g_scale "$G_SCALE")
+  CMD+=(--g_start 1001 --g_stop 1 --g_space "$G_SPACE" --g_repeat "$G_REPEAT")
+  CMD+=(--g_weight_mode "$G_WEIGHT_MODE" --g_weight_gamma "$G_WEIGHT_GAMMA")
 fi
 
 if [ "$TEXT_GUIDANCE" = true ]; then
-  CMD+=(--text_guidance)
-  CMD+=(--text_detector "$TEXT_DETECTOR")
-  CMD+=(--text_mask_source "$TEXT_MASK_SOURCE")
+  CMD+=(--text_guidance --text_detector "$TEXT_SPOTTING_MODULE" --text_mask_source "$TEXT_MASK_SOURCE")
   CMD+=(--text_guidance_scale "$TEXT_GUIDANCE_SCALE")
-  CMD+=(--text_rgb_weight "$TEXT_RGB_WEIGHT")
-  CMD+=(--text_edge_weight "$TEXT_EDGE_WEIGHT")
-  CMD+=(--text_guidance_start "$TEXT_GUIDANCE_START")
-  CMD+=(--text_guidance_stop "$TEXT_GUIDANCE_STOP")
-  CMD+=(--text_guidance_mode "$TEXT_GUIDANCE_MODE")
-  CMD+=(--text_grad_clip "$TEXT_GRAD_CLIP")
-  CMD+=(--text_guidance_loss "$TEXT_GUIDANCE_LOSS")
-  CMD+=(--text_mask_dilate "$TEXT_MASK_DILATE")
-  CMD+=(--text_mask_blur "$TEXT_MASK_BLUR")
-  CMD+=(--text_min_confidence "$TEXT_MIN_CONFIDENCE")
-  CMD+=(--text_min_area "$TEXT_MIN_AREA")
+  CMD+=(--text_rgb_weight "$TEXT_RGB_WEIGHT" --text_edge_weight "$TEXT_EDGE_WEIGHT")
+  CMD+=(--text_guidance_start 0.0 --text_guidance_stop "$TEXT_GUIDANCE_STOP")
+  CMD+=(--text_guidance_mode "$TEXT_GUIDANCE_MODE" --text_grad_clip "$TEXT_GRAD_CLIP")
+  CMD+=(--text_guidance_loss edge_rgb)
+  CMD+=(--text_mask_dilate "$TEXT_MASK_DILATE" --text_mask_blur "$TEXT_MASK_BLUR")
+  CMD+=(--text_min_confidence "$TEXT_MIN_CONFIDENCE" --text_min_area "$TEXT_MIN_AREA")
   CMD+=(--easyocr_langs "$EASYOCR_LANGS")
   CMD+=(--easyocr_text_threshold "$EASYOCR_TEXT_THRESHOLD")
   CMD+=(--easyocr_low_text "$EASYOCR_LOW_TEXT")
   CMD+=(--easyocr_link_threshold "$EASYOCR_LINK_THRESHOLD")
   CMD+=(--easyocr_canvas_size "$EASYOCR_CANVAS_SIZE")
   CMD+=(--easyocr_mag_ratio "$EASYOCR_MAG_RATIO")
-  if [ "$SAVE_TEXT_MASK" = true ]; then
-    CMD+=(--save_text_mask)
+  CMD+=(--save_text_mask --text_debug_dir "$TEXT_DETECTION_DIR")
+
+  if [ "$TEXT_REGIONAL_NOISE" = true ]; then
+    CMD+=(--text_regional_noise)
   fi
-  if [ -n "$TEXT_DEBUG_DIR" ]; then
-    CMD+=(--text_debug_dir "$TEXT_DEBUG_DIR")
+  CMD+=(--text_noise_timestep_ratio "$TEXT_NOISE_TIMESTEP_RATIO")
+  CMD+=(--nontext_noise_timestep_ratio "$NONTEXT_NOISE_TIMESTEP_RATIO")
+  CMD+=(--text_noise_scale "$TEXT_NOISE_SCALE")
+  CMD+=(--nontext_noise_scale "$NONTEXT_NOISE_SCALE")
+
+  if [ "$TEXT_LATENT_ANCHOR" = true ]; then
+    CMD+=(--text_latent_anchor)
   fi
+  CMD+=(--text_latent_anchor_alpha "$TEXT_LATENT_ANCHOR_ALPHA")
 fi
 
-# MANIQA
 if [ "$EVAL_MANIQA" = true ]; then
-  CMD+=(--eval_maniqa)
-  CMD+=(--maniqa_model "$MANIQA_MODEL")
+  CMD+=(--eval_maniqa --maniqa_model "$MANIQA_MODEL")
 fi
-
-# LPIPS
-if [ "$EVAL_LPIPS" = true ]; then
-  CMD+=(--eval_lpips)
-  CMD+=(--lpips_model "$LPIPS_MODEL")
+if [ "$EVAL_LPIPS" = true ] && [ -n "$GT_DIR" ]; then
+  CMD+=(--eval_lpips --lpips_model "$LPIPS_MODEL" --gt_dir "$GT_DIR")
 fi
-
-# IQA CSV (if any IQA evaluation is enabled)
 if [ "$EVAL_MANIQA" = true ] || [ "$EVAL_LPIPS" = true ]; then
-  CMD+=(--iqa_csv "$IQA_CSV")
+  CMD+=(--iqa_csv "../metrics/iqa_results.csv")
 fi
 
-# Optional scalar/string params
-if [ -n "$START_POINT_NOISE_SCALE" ]; then
-  CMD+=(--start_point_noise_scale "$START_POINT_NOISE_SCALE")
-fi
+CMD+=(--noise_aug "$NOISE_AUG" --eta "$ETA" --order "$ORDER" --strength "$STRENGTH")
+CMD+=(--s_churn "$S_CHURN" --s_tmin "$S_TMIN" --s_tmax "$S_TMAX" --s_noise "$S_NOISE")
+CMD+=(--pos_prompt "$POS_PROMPT" --neg_prompt "$NEG_PROMPT")
 
-if [ -n "$POS_PROMPT" ]; then
-  CMD+=(--pos_prompt "$POS_PROMPT")
-fi
-
-if [ -n "$NEG_PROMPT" ]; then
-  CMD+=(--neg_prompt "$NEG_PROMPT")
-fi
-
-if [ -n "$TRAIN_CFG" ]; then
-  CMD+=(--train_cfg "$TRAIN_CFG")
-fi
-
-if [ -n "$CKPT" ]; then
-  CMD+=(--ckpt "$CKPT")
-fi
-
-if [ -n "$LORA_CKPT" ]; then
-  CMD+=(--lora_ckpt "$LORA_CKPT")
-fi
-
-# Optional sampler extras
-CMD+=(--noise_aug "$NOISE_AUG")
-CMD+=(--eta "$ETA")
-CMD+=(--order "$ORDER")
-CMD+=(--strength "$STRENGTH")
-CMD+=(--s_churn "$S_CHURN")
-CMD+=(--s_tmin "$S_TMIN")
-CMD+=(--s_tmax "$S_TMAX")
-CMD+=(--s_noise "$S_NOISE")
-
-# ==========================================
-# Run inference
-# ==========================================
 echo "=========================================="
-echo "Running DiffBIR with the following config:"
-echo "EXPERIMENT_NAME=$EXPERIMENT_NAME"
-echo "GPU=$GPU"
-echo "TASK=$TASK"
-echo "VERSION=$VERSION"
-echo "UPSCALE=$UPSCALE"
+echo "DiffBIR experiment"
+echo "EXPERIMENT=$EXPERIMENT"
+echo "EXPERIMENT_DIR=$EXPERIMENT_DIR"
+echo "RESULT_DIR=$RESULT_DIR"
+echo "TEXT_DETECTION_DIR=$TEXT_DETECTION_DIR"
+echo "METRICS_DIR=$METRICS_DIR"
+echo "TEXT_GUIDANCE=$TEXT_GUIDANCE"
+echo "PRESERVE_TEXT=$PRESERVE_TEXT"
+echo "STAGE1_MODEL=$STAGE1_MODEL"
 echo "INPUT_DIR=$INPUT_DIR"
 echo "GT_DIR=$GT_DIR"
-echo "OUTPUT_DIR=$OUTPUT_DIR"
-echo "AUTO_RESIZE=$AUTO_RESIZE"
-echo "MAX_INPUT_SIDE=$MAX_INPUT_SIDE"
-echo "SAMPLER=$SAMPLER"
-echo "STEPS=$STEPS"
-echo "CFG_SCALE=$CFG_SCALE"
-echo "START_POINT_TYPE=$START_POINT_TYPE"
-echo "PRECISION=$PRECISION"
-echo "STAGE1_MODEL=$STAGE1_MODEL"
-echo "STAGE1_CKPT=$STAGE1_CKPT"
-echo "STAGE1_CONFIG=$STAGE1_CONFIG"
-echo "CLEANER_TYPE=$CLEANER_TYPE"
-echo "RESTORMER_REPO=$RESTORMER_REPO"
-echo "RESTORMER_TASK=$RESTORMER_TASK"
-echo "RESTORMER_CKPT=$RESTORMER_CKPT"
-echo "NAFNET_REPO=$NAFNET_REPO"
-echo "NAFNET_CKPT=$NAFNET_CKPT"
-echo "MPRNET_REPO=$MPRNET_REPO"
-echo "MPRNET_CKPT=$MPRNET_CKPT"
-echo "CLEANER_TILED=$CLEANER_TILED"
-echo "CLDM_TILED=$CLDM_TILED"
-echo "VAE_ENCODER_TILED=$VAE_ENCODER_TILED"
-echo "VAE_DECODER_TILED=$VAE_DECODER_TILED"
-echo "GUIDANCE=$GUIDANCE"
-echo "G_LOSS=$G_LOSS"
-echo "G_SCALE=$G_SCALE"
-echo "G_START=$G_START"
-echo "G_STOP=$G_STOP"
-echo "G_SPACE=$G_SPACE"
-echo "G_REPEAT=$G_REPEAT"
-echo "G_WEIGHT_MODE=$G_WEIGHT_MODE"
-echo "G_WEIGHT_FLOOR=$G_WEIGHT_FLOOR"
-echo "G_WEIGHT_GAMMA=$G_WEIGHT_GAMMA"
-echo "G_BLOCK_SIZE=$G_BLOCK_SIZE"
-echo "TEXT_GUIDANCE=$TEXT_GUIDANCE"
-echo "TEXT_DETECTOR=$TEXT_DETECTOR"
-echo "TEXT_MASK_SOURCE=$TEXT_MASK_SOURCE"
-echo "TEXT_GUIDANCE_SCALE=$TEXT_GUIDANCE_SCALE"
-echo "TEXT_RGB_WEIGHT=$TEXT_RGB_WEIGHT"
-echo "TEXT_EDGE_WEIGHT=$TEXT_EDGE_WEIGHT"
-echo "TEXT_GUIDANCE_START=$TEXT_GUIDANCE_START"
-echo "TEXT_GUIDANCE_STOP=$TEXT_GUIDANCE_STOP"
-echo "TEXT_GUIDANCE_MODE=$TEXT_GUIDANCE_MODE"
-echo "TEXT_GRAD_CLIP=$TEXT_GRAD_CLIP"
-echo "TEXT_MASK_DILATE=$TEXT_MASK_DILATE"
-echo "TEXT_MASK_BLUR=$TEXT_MASK_BLUR"
-echo "TEXT_MIN_CONFIDENCE=$TEXT_MIN_CONFIDENCE"
-echo "TEXT_MIN_AREA=$TEXT_MIN_AREA"
-echo "EASYOCR_LANGS=$EASYOCR_LANGS"
-echo "EASYOCR_TEXT_THRESHOLD=$EASYOCR_TEXT_THRESHOLD"
-echo "EASYOCR_LOW_TEXT=$EASYOCR_LOW_TEXT"
-echo "EASYOCR_LINK_THRESHOLD=$EASYOCR_LINK_THRESHOLD"
-echo "EASYOCR_CANVAS_SIZE=$EASYOCR_CANVAS_SIZE"
-echo "EASYOCR_MAG_RATIO=$EASYOCR_MAG_RATIO"
-echo "SAVE_TEXT_MASK=$SAVE_TEXT_MASK"
-echo "EVAL_MANIQA=$EVAL_MANIQA"
-echo "MANIQA_MODEL=$MANIQA_MODEL"
-echo "EVAL_LPIPS=$EVAL_LPIPS"
-echo "LPIPS_MODEL=$LPIPS_MODEL"
-echo "IQA_CSV=$IQA_CSV"
-echo "EVAL_METRICS=$EVAL_METRICS"
-echo "RESIZE_PRED_TO_GT=$RESIZE_PRED_TO_GT"
-echo "METRICS_CSV=$METRICS_CSV"
-echo "LORA_CKPT=$LORA_CKPT"
 echo "=========================================="
 
-CUDA_VISIBLE_DEVICES="$GPU" "${CMD[@]}"
+# ---------- EXPERIMENT=3: Stage1 image for text replacement ----------
+if [ "$PRESERVE_TEXT" = true ]; then
+  STAGE1_CLEANER_TYPE=default
+  if [ "$STAGE1_MODEL" = "restormer" ] || [ "$STAGE1_MODEL" = "nafnet" ] || [ "$STAGE1_MODEL" = "mprnet" ]; then
+    STAGE1_CLEANER_TYPE="$STAGE1_MODEL"
+  fi
 
-# ==========================================
-# Run GT-based metric evaluation
-# ==========================================
-if [ "$EVAL_METRICS" = true ]; then
-  EVAL_CMD=(
-    python eval_metrics.py
-    --pred_dir "$OUTPUT_DIR"
+  STAGE1_CMD=(
+    python run_stage1_only.py
+    --input "$INPUT_DIR"
+    --output "$STAGE1_BLEND_DIR"
     --gt_dir "$GT_DIR"
-    --save_csv "$OUTPUT_DIR/$METRICS_CSV"
+    --task "$TASK"
+    --version "$VERSION"
+    --device "$DEVICE"
+    --precision "$PRECISION"
+    --seed "$SEED"
+    --upscale "$UPSCALE"
+    --cleaner_type "$STAGE1_CLEANER_TYPE"
+    --restormer_repo "$RESTORMER_REPO"
+    --restormer_task "$RESTORMER_TASK"
+    --restormer_ckpt "${STAGE1_CKPT:-$RESTORMER_CKPT}"
+    --nafnet_repo "$NAFNET_REPO"
+    --nafnet_ckpt "${STAGE1_CKPT:-$NAFNET_CKPT}"
+    --mprnet_repo "$MPRNET_REPO"
+    --mprnet_ckpt "${STAGE1_CKPT:-$MPRNET_CKPT}"
   )
 
+  if [ "$CLEANER_TILED" = true ]; then
+    STAGE1_CMD+=(--cleaner_tiled --cleaner_tile_size "$CLEANER_TILE_SIZE" --cleaner_tile_stride "$CLEANER_TILE_STRIDE")
+  fi
+
+  echo "Generating Stage1 images for EXPERIMENT=3..."
+  CUDA_VISIBLE_DEVICES="$GPU" "${STAGE1_CMD[@]}"
+fi
+
+# ---------- Stage2 ----------
+CUDA_VISIBLE_DEVICES="$GPU" "${CMD[@]}"
+
+# ---------- EXPERIMENT=3: blend Stage1 text with Stage2 non-text ----------
+if [ "$PRESERVE_TEXT" = true ]; then
+  TEXT_BLEND_CMD=(
+    python scripts/blend_stage1_text_regions.py
+    --stage1_dir "$STAGE1_BLEND_DIR"
+    --stage2_dir "$STAGE2_RAW_DIR"
+    --output_dir "$RESULT_DIR"
+    --det_source "$TEXT_BLEND_DET_SOURCE"
+    --langs "$TEXT_BLEND_OCR_LANGS"
+    --ocr_scale "$TEXT_BLEND_OCR_SCALE"
+    --min_conf "$TEXT_BLEND_MIN_CONF"
+    --min_area "$TEXT_BLEND_MIN_AREA"
+    --pad_ratio "$TEXT_BLEND_PAD_RATIO"
+    --feather "$TEXT_BLEND_FEATHER"
+    --diagnostics_dir "$TEXT_DETECTION_DIR"
+    --save_diagnostics
+  )
+  if [ "$TEXT_BLEND_USE_GPU_OCR" = true ]; then
+    TEXT_BLEND_CMD+=(--use_gpu_ocr)
+  fi
+
+  echo "Blending Stage1 text regions into Stage2 output..."
+  CUDA_VISIBLE_DEVICES="$GPU" "${TEXT_BLEND_CMD[@]}"
+fi
+
+# ---------- Metrics ----------
+if [ "$EVAL_METRICS" = true ] && [ -n "$GT_DIR" ]; then
+  METRICS_CMD=(
+    python eval_metrics.py
+    --pred_dir "$FINAL_PRED_DIR"
+    --gt_dir "$GT_DIR"
+    --save_csv "$METRICS_DIR/metrics_psnr_ssim.csv"
+  )
   if [ "$RESIZE_PRED_TO_GT" = true ]; then
-    EVAL_CMD+=(--resize_pred_to_gt)
+    METRICS_CMD+=(--resize_pred_to_gt)
   fi
 
-  echo "=========================================="
-  echo "Running metric evaluation..."
-  echo "PRED_DIR=$OUTPUT_DIR"
-  echo "GT_DIR=$GT_DIR"
-  echo "RESIZE_PRED_TO_GT=$RESIZE_PRED_TO_GT"
-  echo "METRICS_CSV=$OUTPUT_DIR/$METRICS_CSV"
-  echo "=========================================="
-
-  "${EVAL_CMD[@]}"
+  echo "Running PSNR/SSIM metrics..."
+  "${METRICS_CMD[@]}"
 fi
 
-# ==========================================
-# Print MANIQA summary
-# ==========================================
-if [ "$EVAL_MANIQA" = true ]; then
-  IQA_PATH="$OUTPUT_DIR/$IQA_CSV"
-
-  if [ -f "$IQA_PATH" ]; then
-    echo "=========================================="
-    echo "MANIQA summary"
-    echo "IQA_PATH=$IQA_PATH"
-    echo "=========================================="
-
-    python - <<PY
-import pandas as pd
-
-csv_path = r"$IQA_PATH"
-df = pd.read_csv(csv_path)
-
-if "maniqa" not in df.columns:
-    raise ValueError(f"'maniqa' column not found in {csv_path}")
-
-for _, row in df.iterrows():
-    print(f"{row['file_name']}: MANIQA={row['maniqa']:.6f}")
-
-print("============================================================")
-print(f"Average MANIQA: {df['maniqa'].mean():.6f}")
-PY
-  else
-    echo "[WARN] MANIQA CSV not found: $IQA_PATH"
-  fi
-fi
-
-# ==========================================
-# Print Notion-friendly summary
-# ==========================================
-if [ "$EVAL_MANIQA" = true ] || [ "$EVAL_LPIPS" = true ] || [ "$EVAL_METRICS" = true ]; then
-  echo "=========================================="
-  echo "Notion summary"
-  echo "Copy the next lines into Notion:"
-  echo "=========================================="
-  python scripts/notion_metrics.py "$OUTPUT_DIR" --iqa_csv "$IQA_CSV" --metrics_csv "$METRICS_CSV" --format blocks
-fi
+echo "=========================================="
+echo "Done"
+echo "Result images: $RESULT_DIR"
+echo "Text detection: $TEXT_DETECTION_DIR"
+echo "Metrics: $METRICS_DIR"
+echo "=========================================="

@@ -236,11 +236,24 @@ class TextGuidance:
         self.loss_type = loss_type
         self.target = None
         self.mask = None
+        self.latent_anchor = None
+        self.latent_mask = None
+        self.latent_anchor_alpha = 0.0
         self.active_indices = []
 
     def load_target(self, target: torch.Tensor, mask: torch.Tensor) -> None:
         self.target = target
         self.mask = mask
+
+    def load_latent_anchor(
+        self,
+        latent_anchor: torch.Tensor,
+        latent_mask: torch.Tensor,
+        alpha: float,
+    ) -> None:
+        self.latent_anchor = latent_anchor
+        self.latent_mask = latent_mask
+        self.latent_anchor_alpha = float(alpha)
 
     def configure_steps(self, total_steps: int) -> None:
         if total_steps <= 0:
@@ -275,6 +288,22 @@ class TextGuidance:
         if self.mask.sum().item() <= 0:
             return False
         return step_index in set(self.active_indices)
+
+    def should_anchor(self, step_index: int) -> bool:
+        if self.latent_anchor_alpha <= 0:
+            return False
+        if self.latent_anchor is None or self.latent_mask is None:
+            return False
+        if self.latent_mask.sum().item() <= 0:
+            return False
+        return step_index in set(self.active_indices)
+
+    def apply_latent_anchor(self, latent: torch.Tensor) -> torch.Tensor:
+        anchor = self.latent_anchor.to(device=latent.device, dtype=latent.dtype)
+        mask = self.latent_mask.to(device=latent.device, dtype=latent.dtype)
+        alpha = max(0.0, min(1.0, self.latent_anchor_alpha))
+        weight = (mask * alpha).clamp(0, 1)
+        return latent * (1.0 - weight) + anchor * weight
 
     def loss(self, pred_rgb: torch.Tensor) -> torch.Tensor:
         return compute_text_guidance_loss(

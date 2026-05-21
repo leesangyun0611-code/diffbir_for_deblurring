@@ -292,6 +292,9 @@ class SpacedSampler(Sampler):
         noise = torch.randn_like(x)
         nonzero_mask = (t != 0).float().view(-1, *([1] * (len(x.shape) - 1)))
         x_prev = mean + nonzero_mask * torch.sqrt(variance) * noise
+        text_guidance = getattr(cond_fn, "text_guidance", None) if cond_fn is not None else None
+        if text_guidance is not None and text_guidance.should_anchor(step_index):
+            x_prev = text_guidance.apply_latent_anchor(x_prev)
         return x_prev
 
     @torch.no_grad()

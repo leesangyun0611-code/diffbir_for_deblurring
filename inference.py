@@ -545,6 +545,53 @@ def parse_args() -> Namespace:
         default="edge_rgb",
         choices=["edge_rgb", "charbonnier", "l1", "mse"],
     )
+    parser.add_argument(
+        "--text_regional_noise",
+        action="store_true",
+        help=(
+            "Use text-aware regional noise initialization: text regions start "
+            "from lower-noise Stage 1 latent while non-text regions keep the "
+            "normal diffusion start."
+        ),
+    )
+    parser.add_argument(
+        "--text_noise_timestep_ratio",
+        type=float,
+        default=0.15,
+        help="Timestep ratio used for text-region start noise. Lower preserves Stage 1 text more.",
+    )
+    parser.add_argument(
+        "--nontext_noise_timestep_ratio",
+        type=float,
+        default=1.0,
+        help="Timestep ratio used for non-text start noise. 1.0 matches the original cond start.",
+    )
+    parser.add_argument(
+        "--text_noise_scale",
+        type=float,
+        default=1.0,
+        help="Extra multiplier for random noise injected into text-region q_sample.",
+    )
+    parser.add_argument(
+        "--nontext_noise_scale",
+        type=float,
+        default=1.0,
+        help="Extra multiplier for random noise injected into non-text q_sample.",
+    )
+    parser.add_argument(
+        "--text_latent_anchor",
+        action="store_true",
+        help=(
+            "After each Stage 2 sampler step, softly anchor text-region latent "
+            "back to the Stage 1 condition latent."
+        ),
+    )
+    parser.add_argument(
+        "--text_latent_anchor_alpha",
+        type=float,
+        default=0.7,
+        help="Text latent anchoring strength in [0, 1]. Higher follows Stage 1 text more.",
+    )
 
     # common parameters
     parser.add_argument(
@@ -651,6 +698,26 @@ def main():
             "[TextGuidance] Warning: text guidance is currently inserted in the "
             "'spaced' sampler guidance path. Use --sampler spaced for text-aware guidance."
         )
+    if args.text_guidance:
+        print("[TextGuidanceArgs][inference.py] text_guidance=", args.text_guidance)
+        print("[TextGuidanceArgs][inference.py] text_detector=", args.text_detector)
+        print("[TextGuidanceArgs][inference.py] text_mask_source=", args.text_mask_source)
+        print("[TextGuidanceArgs][inference.py] text_min_confidence=", args.text_min_confidence)
+        print("[TextGuidanceArgs][inference.py] text_min_area=", args.text_min_area)
+        print("[TextGuidanceArgs][inference.py] easyocr_langs=", args.easyocr_langs)
+        print("[TextGuidanceArgs][inference.py] easyocr_text_threshold=", args.easyocr_text_threshold)
+        print("[TextGuidanceArgs][inference.py] easyocr_low_text=", args.easyocr_low_text)
+        print("[TextGuidanceArgs][inference.py] easyocr_link_threshold=", args.easyocr_link_threshold)
+        print("[TextGuidanceArgs][inference.py] easyocr_canvas_size=", args.easyocr_canvas_size)
+        print("[TextGuidanceArgs][inference.py] easyocr_mag_ratio=", args.easyocr_mag_ratio)
+        print("[TextGuidanceArgs][inference.py] save_text_mask=", args.save_text_mask)
+        print("[TextGuidanceArgs][inference.py] text_regional_noise=", args.text_regional_noise)
+        print("[TextGuidanceArgs][inference.py] text_noise_timestep_ratio=", args.text_noise_timestep_ratio)
+        print("[TextGuidanceArgs][inference.py] nontext_noise_timestep_ratio=", args.nontext_noise_timestep_ratio)
+        print("[TextGuidanceArgs][inference.py] text_noise_scale=", args.text_noise_scale)
+        print("[TextGuidanceArgs][inference.py] nontext_noise_scale=", args.nontext_noise_scale)
+        print("[TextGuidanceArgs][inference.py] text_latent_anchor=", args.text_latent_anchor)
+        print("[TextGuidanceArgs][inference.py] text_latent_anchor_alpha=", args.text_latent_anchor_alpha)
 
     if args.auto_resize_input:
         args.input, resized = maybe_resize_input_to_small(

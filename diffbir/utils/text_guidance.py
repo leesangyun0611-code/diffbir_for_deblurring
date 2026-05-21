@@ -41,6 +41,50 @@ def _masked_mean(value: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     return (value * mask).sum(dim=(1, 2, 3)).div(denom).sum()
 
 
+def align_ref_and_mask_to_pred(
+    x_pred: torch.Tensor,
+    x_ref: torch.Tensor,
+    text_mask: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    x_ref = x_ref.to(device=x_pred.device, dtype=x_pred.dtype)
+    text_mask = text_mask.to(device=x_pred.device, dtype=x_pred.dtype)
+
+    if text_mask.ndim == 3:
+        text_mask = text_mask.unsqueeze(1)
+
+    ref_h, ref_w = x_ref.shape[-2:]
+    pred_h, pred_w = x_pred.shape[-2:]
+
+    # Stage 2 may decode padded VAE dimensions. In that case crop the prediction
+    # back to the real Stage 1/reference region instead of resizing text strokes.
+    if pred_h >= ref_h and pred_w >= ref_w:
+        x_pred = x_pred[..., :ref_h, :ref_w]
+        if text_mask.shape[-2:] != (ref_h, ref_w):
+            text_mask = F.interpolate(
+                text_mask,
+                size=(ref_h, ref_w),
+                mode="bilinear",
+                align_corners=False,
+            )
+        return x_pred, x_ref, text_mask.clamp(0.0, 1.0)
+
+    if x_ref.shape[-2:] != x_pred.shape[-2:]:
+        x_ref = F.interpolate(
+            x_ref,
+            size=x_pred.shape[-2:],
+            mode="bilinear",
+            align_corners=False,
+        )
+    if text_mask.shape[-2:] != x_pred.shape[-2:]:
+        text_mask = F.interpolate(
+            text_mask,
+            size=x_pred.shape[-2:],
+            mode="bilinear",
+            align_corners=False,
+        )
+    return x_pred, x_ref, text_mask.clamp(0.0, 1.0)
+
+
 def masked_rgb_loss(
     x_pred: torch.Tensor,
     x_ref: torch.Tensor,
@@ -82,12 +126,7 @@ def compute_text_guidance_loss(
     if text_mask.sum().item() <= 0:
         return x_pred.new_tensor(0.0)
 
-    if text_mask.ndim == 3:
-        text_mask = text_mask.unsqueeze(1)
-    text_mask = text_mask.to(device=x_pred.device, dtype=x_pred.dtype)
-    if text_mask.shape[-2:] != x_pred.shape[-2:]:
-        text_mask = F.interpolate(text_mask, size=x_pred.shape[-2:], mode="bilinear", align_corners=False)
-    text_mask = text_mask.clamp(0.0, 1.0)
+    x_pred, x_ref, text_mask = align_ref_and_mask_to_pred(x_pred, x_ref, text_mask)
 
     rgb = masked_rgb_loss(x_pred, x_ref, text_mask, loss_type=loss_type)
     edge = masked_edge_loss(x_pred, x_ref, text_mask)

@@ -14,6 +14,53 @@ class BaseTextDetector:
     def detect(self, image: np.ndarray, source: str = "stage1") -> List[Detection]:
         raise NotImplementedError
 
+    def get_debug_info(self) -> Dict[str, Any]:
+        return {}
+
+
+def to_easyocr_uint8_rgb(image: Any) -> np.ndarray:
+    try:
+        import torch
+    except ImportError:
+        torch = None
+
+    if torch is not None and isinstance(image, torch.Tensor):
+        image = image.detach().float().cpu()
+        if image.ndim == 4:
+            image = image[0]
+        if image.ndim == 3 and image.shape[0] in (1, 3, 4):
+            image = image.permute(1, 2, 0)
+        image = image.numpy()
+    elif isinstance(image, Image.Image):
+        image = np.asarray(image.convert("RGB"))
+    else:
+        image = np.asarray(image)
+
+    if image.ndim == 4:
+        image = image[0]
+    if image.ndim == 3 and image.shape[0] in (1, 3, 4) and image.shape[-1] not in (1, 3, 4):
+        image = np.transpose(image, (1, 2, 0))
+    if image.ndim == 2:
+        image = np.repeat(image[..., None], 3, axis=2)
+    if image.ndim != 3:
+        raise ValueError(f"Expected HWC image for EasyOCR, got shape {image.shape}")
+    if image.shape[2] == 1:
+        image = np.repeat(image, 3, axis=2)
+    if image.shape[2] == 4:
+        image = image[..., :3]
+    if image.shape[2] != 3:
+        raise ValueError(f"Expected 3-channel RGB image for EasyOCR, got shape {image.shape}")
+
+    image = image.astype(np.float32, copy=False)
+    min_v = float(np.nanmin(image)) if image.size else 0.0
+    max_v = float(np.nanmax(image)) if image.size else 0.0
+    if min_v < 0.0:
+        image = (image + 1.0) * 127.5
+    elif max_v <= 1.5:
+        image = image * 255.0
+    image = np.nan_to_num(image, nan=0.0, posinf=255.0, neginf=0.0)
+    return np.clip(image, 0, 255).round().astype(np.uint8)
+
 
 @dataclass
 class EasyOCRTextDetector(BaseTextDetector):
@@ -28,27 +75,117 @@ class EasyOCRTextDetector(BaseTextDetector):
     def __post_init__(self) -> None:
         self.reader = None
         self.available = True
+        self.init_error = ""
+        self.last_debug: Dict[str, Any] = {}
         try:
             import easyocr
 
-            self.reader = easyocr.Reader(list(self.langs), gpu=False)
+            self.reader = easyocr.Reader(list(self.langs), gpu=False, recognizer=False)
+            print("[TextDetection] EasyOCR backend initialized in detection-only mode (recognizer=False).")
         except ImportError:
             self.available = False
+            self.init_error = "EasyOCR is not installed."
             print(
                 "EasyOCR is not installed. Text mask will be empty. "
                 "Install with: pip install easyocr"
             )
         except Exception as exc:
             self.available = False
+            self.init_error = str(exc)
             print(f"[TextDetection] EasyOCR initialization failed: {exc}")
 
+    def _empty_debug(self, image: np.ndarray, source: str) -> Dict[str, Any]:
+        return {
+            "source": source,
+            "image_shape": list(image.shape),
+            "image_dtype": str(image.dtype),
+            "image_minmax": [
+                int(image.min()) if image.size else 0,
+                int(image.max()) if image.size else 0,
+            ],
+            "is_hwc": bool(image.ndim == 3),
+            "is_uint8": bool(image.dtype == np.uint8),
+            "channel_count": int(image.shape[2]) if image.ndim == 3 else None,
+            "is_rgb": True,
+            "raw_detect_count": 0,
+            "raw_readtext_count": 0,
+            "after_conf_filter_count": 0,
+            "after_area_filter_count": 0,
+            "final_count": 0,
+            "detector_available": bool(self.available and self.reader is not None),
+            "init_error": self.init_error,
+            "thresholds": self._thresholds(),
+            "first_polygons": [],
+        }
+
+    def _thresholds(self) -> Dict[str, Any]:
+        return {
+            "text_min_confidence": self.text_min_confidence,
+            "text_min_area": None,
+            "easyocr_text_threshold": self.easyocr_text_threshold,
+            "easyocr_low_text": self.easyocr_low_text,
+            "easyocr_link_threshold": self.easyocr_link_threshold,
+            "easyocr_canvas_size": self.easyocr_canvas_size,
+            "easyocr_mag_ratio": self.easyocr_mag_ratio,
+        }
+
+    def _box_to_polygon(self, box: Any) -> np.ndarray | None:
+        arr = np.asarray(box, dtype=np.float32)
+        if arr.size == 4 and arr.ndim == 1:
+            x_min, x_max, y_min, y_max = arr.tolist()
+            return np.asarray(
+                [[x_min, y_min], [x_max, y_min], [x_max, y_max], [x_min, y_max]],
+                dtype=np.float32,
+            )
+        arr = arr.reshape(-1, 2) if arr.size >= 8 else arr
+        if arr.ndim == 2 and arr.shape[0] >= 4 and arr.shape[1] == 2:
+            return arr.astype(np.float32)
+        return None
+
+    def _flatten_easyocr_boxes(self, boxes: Any) -> List[Any]:
+        if boxes is None:
+            return []
+        arr = np.asarray(boxes, dtype=object)
+        if arr.ndim == 1 and arr.size == 4 and all(np.isscalar(x) for x in boxes):
+            return [boxes]
+        if arr.ndim == 2 and arr.shape[1] == 2 and arr.shape[0] >= 4:
+            return [boxes]
+        if isinstance(boxes, tuple):
+            out: List[Any] = []
+            for item in boxes:
+                out.extend(self._flatten_easyocr_boxes(item))
+            return out
+        if isinstance(boxes, list):
+            if not boxes:
+                return []
+            first = np.asarray(boxes[0], dtype=object)
+            if first.ndim >= 1 and first.size in (4, 8) and not np.isscalar(boxes[0]):
+                return boxes
+            if len(boxes) == 1 and isinstance(boxes[0], list):
+                return self._flatten_easyocr_boxes(boxes[0])
+            out: List[Any] = []
+            for item in boxes:
+                if isinstance(item, list) and item and not (
+                    np.asarray(item, dtype=object).ndim == 1 and np.asarray(item, dtype=object).size in (4, 8)
+                ):
+                    out.extend(self._flatten_easyocr_boxes(item))
+                else:
+                    out.append(item)
+            return out
+        return [boxes]
+
     def detect(self, image: np.ndarray, source: str = "stage1") -> List[Detection]:
+        image = to_easyocr_uint8_rgb(image)
+        debug = self._empty_debug(image, source)
         if not self.available or self.reader is None:
+            print(
+                f"[TextDetectionDebug] source={source} detector unavailable. "
+                f"init_error={self.init_error}"
+            )
+            self.last_debug[source] = debug
             return []
 
-        kwargs = dict(
-            detail=1,
-            paragraph=False,
+        detect_kwargs = dict(
             text_threshold=self.easyocr_text_threshold,
             low_text=self.easyocr_low_text,
             link_threshold=self.easyocr_link_threshold,
@@ -56,26 +193,74 @@ class EasyOCRTextDetector(BaseTextDetector):
             mag_ratio=self.easyocr_mag_ratio,
         )
         try:
-            results = self.reader.readtext(image, **kwargs)
+            horizontal_list, free_list = self.reader.detect(image, **detect_kwargs)
         except TypeError:
-            results = self.reader.readtext(image, detail=1, paragraph=False)
+            horizontal_list, free_list = self.reader.detect(image)
+        except Exception as exc:
+            print(f"[TextDetectionDebug] source={source} detect() failed: {exc}")
+            horizontal_list, free_list = [], []
+
+        raw_boxes = self._flatten_easyocr_boxes(horizontal_list) + self._flatten_easyocr_boxes(free_list)
+        polygons = []
+        for box in raw_boxes:
+            poly = self._box_to_polygon(box)
+            if poly is not None:
+                polygons.append(poly)
+
+        raw_readtext_count = 0
+        if getattr(self.reader, "recognizer", None) is not None:
+            try:
+                read_results = self.reader.readtext(
+                    image,
+                    detail=1,
+                    paragraph=False,
+                    text_threshold=self.easyocr_text_threshold,
+                    low_text=self.easyocr_low_text,
+                    link_threshold=self.easyocr_link_threshold,
+                    canvas_size=self.easyocr_canvas_size,
+                    mag_ratio=self.easyocr_mag_ratio,
+                )
+                raw_readtext_count = len(read_results)
+            except Exception as exc:
+                print(f"[TextDetectionDebug] source={source} readtext() debug failed: {exc}")
+
+        debug["raw_detect_count"] = len(polygons)
+        debug["raw_readtext_count"] = raw_readtext_count
+        debug["after_conf_filter_count"] = len(polygons)
 
         detections: List[Detection] = []
-        for item in results:
-            if len(item) < 3:
-                continue
-            polygon, text, score = item[0], item[1], float(item[2])
-            if score < self.text_min_confidence:
-                continue
+        for polygon in polygons:
             detections.append(
                 {
                     "polygon": np.asarray(polygon, dtype=np.float32),
-                    "score": score,
+                    "score": 1.0,
                     "source": source,
-                    "text": text,
+                    "text": "",
                 }
             )
+        debug["after_area_filter_count"] = len(detections)
+        debug["final_count"] = len(detections)
+        debug["first_polygons"] = [
+            np.asarray(det["polygon"], dtype=np.float32).tolist()
+            for det in detections[:10]
+        ]
+        self.last_debug[source] = debug
+
+        print(f"[TextDetectionDebug] source={source}")
+        print(f"[TextDetectionDebug] input_shape={debug['image_shape']}")
+        print(f"[TextDetectionDebug] input_dtype={debug['image_dtype']}")
+        print(f"[TextDetectionDebug] input_minmax={debug['image_minmax']}")
+        print(f"[TextDetectionDebug] is_hwc={debug['is_hwc']} is_uint8={debug['is_uint8']} channel_count={debug['channel_count']}")
+        print(f"[TextDetectionDebug] raw_detect_count={debug['raw_detect_count']}")
+        print(f"[TextDetectionDebug] raw_readtext_count={debug['raw_readtext_count']}")
+        print(f"[TextDetectionDebug] after_conf_filter_count={debug['after_conf_filter_count']}")
+        print(f"[TextDetectionDebug] after_area_filter_count={debug['after_area_filter_count']}")
+        print(f"[TextDetectionDebug] final_count={debug['final_count']}")
+        print(f"[TextDetectionDebug] first_10_polygons={debug['first_polygons']}")
         return detections
+
+    def get_debug_info(self) -> Dict[str, Any]:
+        return self.last_debug
 
 
 class EmptyTextDetector(BaseTextDetector):
@@ -127,11 +312,14 @@ def polygons_to_mask(
     min_area: float = 0,
 ) -> np.ndarray:
     h, w = image_shape[:2]
-    valid_polys = [
-        np.asarray(poly, dtype=np.float32)
-        for poly in polygons
-        if polygon_area(np.asarray(poly)) >= min_area
-    ]
+    valid_polys = []
+    for poly in polygons:
+        poly = np.asarray(poly, dtype=np.float32).reshape(-1, 2)
+        poly[:, 0] = np.clip(poly[:, 0], 0, max(w - 1, 0))
+        poly[:, 1] = np.clip(poly[:, 1], 0, max(h - 1, 0))
+        if min_area > 0 and polygon_area(poly) < min_area:
+            continue
+        valid_polys.append(poly)
     if not valid_polys:
         return np.zeros((h, w), dtype=np.float32)
 
@@ -179,6 +367,7 @@ def save_text_mask_debug(
     soft_mask: np.ndarray,
     detections: Sequence[Detection],
     config: Dict[str, Any],
+    detection_debug: Dict[str, Any] | None = None,
 ) -> None:
     os.makedirs(debug_dir, exist_ok=True)
 
@@ -201,12 +390,18 @@ def save_text_mask_debug(
 
     save_rgb("input_lq.png", lq_image)
     save_rgb("stage1_for_text_detection.png", stage1_image)
+    save_rgb("text_detector_input_lq.png", lq_image)
+    save_rgb("text_detector_input_stage1.png", stage1_image)
     save_mask("text_mask_binary.png", binary_mask > 0)
     save_mask("text_mask_soft.png", soft_mask)
     save_rgb("text_mask_overlay_lq.png", overlay(lq_image, soft_mask))
     save_rgb("text_mask_overlay_stage1.png", overlay(stage1_image, soft_mask))
 
+    payload = {
+        "sources": detection_debug or {},
+        "detections": detections_to_jsonable(detections),
+    }
     with open(os.path.join(debug_dir, "text_detections.json"), "w", encoding="utf-8") as f:
-        json.dump(detections_to_jsonable(detections), f, ensure_ascii=False, indent=2)
+        json.dump(payload, f, ensure_ascii=False, indent=2)
     with open(os.path.join(debug_dir, "text_guidance_config.json"), "w", encoding="utf-8") as f:
         json.dump(config, f, ensure_ascii=False, indent=2)

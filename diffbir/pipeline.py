@@ -26,6 +26,7 @@ from .utils.text_detection import (
     polygons_to_mask,
     postprocess_text_mask,
     save_text_mask_debug,
+    to_easyocr_uint8_rgb,
 )
 from .model import ControlLDM, Diffusion, RRDBNet
 
@@ -86,6 +87,25 @@ class Pipeline:
         self.text_args = args
         if not getattr(args, "text_guidance", False):
             return
+        print("[TextGuidanceArgs] text_guidance=", args.text_guidance)
+        print("[TextGuidanceArgs] text_detector=", args.text_detector)
+        print("[TextGuidanceArgs] text_mask_source=", args.text_mask_source)
+        print("[TextGuidanceArgs] text_min_confidence=", args.text_min_confidence)
+        print("[TextGuidanceArgs] text_min_area=", args.text_min_area)
+        print("[TextGuidanceArgs] easyocr_langs=", args.easyocr_langs)
+        print("[TextGuidanceArgs] easyocr_text_threshold=", args.easyocr_text_threshold)
+        print("[TextGuidanceArgs] easyocr_low_text=", args.easyocr_low_text)
+        print("[TextGuidanceArgs] easyocr_link_threshold=", args.easyocr_link_threshold)
+        print("[TextGuidanceArgs] easyocr_canvas_size=", args.easyocr_canvas_size)
+        print("[TextGuidanceArgs] easyocr_mag_ratio=", args.easyocr_mag_ratio)
+        print("[TextGuidanceArgs] save_text_mask=", args.save_text_mask)
+        print("[TextGuidanceArgs] text_regional_noise=", args.text_regional_noise)
+        print("[TextGuidanceArgs] text_noise_timestep_ratio=", args.text_noise_timestep_ratio)
+        print("[TextGuidanceArgs] nontext_noise_timestep_ratio=", args.nontext_noise_timestep_ratio)
+        print("[TextGuidanceArgs] text_noise_scale=", args.text_noise_scale)
+        print("[TextGuidanceArgs] nontext_noise_scale=", args.nontext_noise_scale)
+        print("[TextGuidanceArgs] text_latent_anchor=", args.text_latent_anchor)
+        print("[TextGuidanceArgs] text_latent_anchor_alpha=", args.text_latent_anchor_alpha)
         self.text_detector = build_text_detector(
             args.text_detector,
             langs=[x.strip() for x in args.easyocr_langs.split(",") if x.strip()],
@@ -104,6 +124,69 @@ class Pipeline:
     def set_output_size(self, lq_size: Tuple[int]) -> None:
         h, w = lq_size[2:]
         self.output_size = (h, w)
+
+    def _get_latent_text_mask(
+        self,
+        latent: torch.Tensor,
+    ) -> torch.Tensor | None:
+        if self.cond_fn is None:
+            return None
+        text_guidance = getattr(self.cond_fn, "text_guidance", None)
+        if text_guidance is None or text_guidance.mask is None:
+            return None
+
+        mask = text_guidance.mask.to(device=latent.device, dtype=latent.dtype)
+        if mask.sum().item() <= 0:
+            return None
+
+        mask = F.interpolate(
+            mask,
+            size=latent.shape[-2:],
+            mode="bilinear",
+            align_corners=False,
+        ).clamp(0, 1)
+        return mask
+
+    def _ratio_to_diffusion_timestep(self, ratio: float) -> int:
+        ratio = max(0.0, min(1.0, float(ratio)))
+        return int(round(ratio * (self.diffusion.num_timesteps - 1)))
+
+    def _apply_text_regional_noise_start(
+        self,
+        x_start: torch.Tensor,
+    ) -> torch.Tensor | None:
+        args = self.text_args
+        if args is None or not getattr(args, "text_regional_noise", False):
+            return None
+
+        latent_mask = self._get_latent_text_mask(x_start)
+        if latent_mask is None:
+            print("[TextRegionalNoise] skipped: empty or unavailable text mask.")
+            return None
+
+        bs = x_start.size(0)
+        t_text_value = self._ratio_to_diffusion_timestep(args.text_noise_timestep_ratio)
+        t_nontext_value = self._ratio_to_diffusion_timestep(args.nontext_noise_timestep_ratio)
+        t_text = torch.full((bs,), t_text_value, dtype=torch.long, device=x_start.device)
+        t_nontext = torch.full((bs,), t_nontext_value, dtype=torch.long, device=x_start.device)
+
+        shared_noise = torch.randn(x_start.shape, dtype=torch.float32, device=x_start.device)
+        text_noise = shared_noise * float(args.text_noise_scale)
+        nontext_noise = shared_noise * float(args.nontext_noise_scale)
+
+        x_text = self.diffusion.q_sample(x_start, t_text, text_noise)
+        x_nontext = self.diffusion.q_sample(x_start, t_nontext, nontext_noise)
+        x_regional = latent_mask * x_text + (1.0 - latent_mask) * x_nontext
+
+        mask_ratio = float((latent_mask > 0).float().mean().item())
+        print(
+            "[TextRegionalNoise] enabled: "
+            f"text_t={t_text_value}, nontext_t={t_nontext_value}, "
+            f"text_noise_scale={args.text_noise_scale}, "
+            f"nontext_noise_scale={args.nontext_noise_scale}, "
+            f"latent_mask_nonzero_ratio={mask_ratio:.6f}"
+        )
+        return x_regional
 
     @overload
     def apply_cleaner(
@@ -185,19 +268,32 @@ class Pipeline:
 
         h2, w2 = cond["c_img"].shape[2:]
 
+        regional_x_T = None
         if start_point_type == "cond":
             x_0 = cond["c_img"]
-            x_T = self.diffusion.q_sample(
-                x_0,
-                torch.full(
-                    (bs,),
-                    self.diffusion.num_timesteps - 1,
-                    dtype=torch.long,
-                    device=self.device,
-                ),
-                torch.randn(x_0.shape, dtype=torch.float32, device=self.device),
-            )
+            regional_x_T = self._apply_text_regional_noise_start(x_0)
+            if regional_x_T is not None:
+                x_T = regional_x_T
+            else:
+                x_T = self.diffusion.q_sample(
+                    x_0,
+                    torch.full(
+                        (bs,),
+                        self.diffusion.num_timesteps - 1,
+                        dtype=torch.long,
+                        device=self.device,
+                    ),
+                    torch.randn(x_0.shape, dtype=torch.float32, device=self.device),
+                )
         else:
+            if (
+                self.text_args is not None
+                and getattr(self.text_args, "text_regional_noise", False)
+            ):
+                print(
+                    "[TextRegionalNoise] skipped: start_point_type must be 'cond' "
+                    "because regional noise needs the Stage 1 latent anchor."
+                )
             x_T = torch.randn((bs, 4, h2, w2), dtype=torch.float32, device=self.device)
 
         if noise_aug > 0:
@@ -211,6 +307,27 @@ class Pipeline:
         if self.cond_fn:
             self.cond_fn.load_target(cond_img * 2 - 1)
             self.cond_fn.target_latent = guidance_latent_target
+            text_guidance = getattr(self.cond_fn, "text_guidance", None)
+            if (
+                text_guidance is not None
+                and self.text_args is not None
+                and getattr(self.text_args, "text_latent_anchor", False)
+            ):
+                latent_mask = self._get_latent_text_mask(cond["c_img"])
+                if latent_mask is not None:
+                    text_guidance.load_latent_anchor(
+                        cond["c_img"].detach().clone(),
+                        latent_mask.detach().clone(),
+                        self.text_args.text_latent_anchor_alpha,
+                    )
+                    print(
+                        "[TextLatentAnchor] enabled: "
+                        f"alpha={self.text_args.text_latent_anchor_alpha}, "
+                        f"latent_mask_nonzero_ratio="
+                        f"{float((latent_mask > 0).float().mean().item()):.6f}"
+                    )
+                else:
+                    print("[TextLatentAnchor] skipped: empty or unavailable text mask.")
 
         control_scales = self.cldm.control_scales
         self.cldm.control_scales = [strength] * 13
@@ -302,14 +419,32 @@ class Pipeline:
         if self.text_detector is None:
             raise RuntimeError("Text guidance is enabled but text detector is not configured.")
 
+        base_debug_dir = (
+            args.text_debug_dir
+            if getattr(args, "text_debug_dir", None)
+            else os.path.join(args.output, "text_guidance_debug")
+        )
+        debug_dir = base_debug_dir
+        if self.text_debug_stem:
+            debug_dir = os.path.join(base_debug_dir, self.text_debug_stem)
+
         lq_for_mask = F.interpolate(
             lq_tensor,
             size=cond_img.shape[-2:],
             mode="bicubic",
             antialias=True,
         ).clamp(0, 1)
-        lq_np = self._tensor_to_uint8_rgb(lq_for_mask)
-        stage1_np = self._tensor_to_uint8_rgb(cond_img)
+        lq_np = to_easyocr_uint8_rgb(lq_for_mask)
+        stage1_np = to_easyocr_uint8_rgb(cond_img)
+
+        if getattr(args, "save_text_mask", False):
+            os.makedirs(debug_dir, exist_ok=True)
+            from PIL import Image
+
+            Image.fromarray(lq_np).save(os.path.join(debug_dir, "text_detector_input_lq.png"))
+            Image.fromarray(stage1_np).save(os.path.join(debug_dir, "text_detector_input_stage1.png"))
+            print(f"[TextDetectionDebug] detector_input_lq={os.path.join(debug_dir, 'text_detector_input_lq.png')}")
+            print(f"[TextDetectionDebug] detector_input_stage1={os.path.join(debug_dir, 'text_detector_input_stage1.png')}")
 
         lq_detections = []
         stage1_detections = []
@@ -325,11 +460,13 @@ class Pipeline:
             stage1_np.shape,
             min_area=args.text_min_area,
         )
+        before_ratio = float((binary_mask > 0).mean())
         soft_mask = postprocess_text_mask(
             binary_mask,
             dilate=args.text_mask_dilate,
             blur=args.text_mask_blur,
         )
+        after_ratio = float((soft_mask > 0).mean())
 
         mask_tensor = (
             torch.from_numpy(soft_mask)
@@ -343,17 +480,16 @@ class Pipeline:
         print(f"[TextGuidance] LQ detections: {len(lq_detections)}")
         print(f"[TextGuidance] Stage 1 detections: {len(stage1_detections)}")
         print(f"[TextGuidance] final union detections: {len(detections)}")
+        print(f"[TextGuidance] mask before postprocess nonzero ratio: {before_ratio:.6f}")
         print(f"[TextGuidance] mask nonzero ratio: {nonzero_ratio:.6f}")
+        print(f"[TextGuidance] mask min/max: {float(soft_mask.min()):.6f}/{float(soft_mask.max()):.6f}")
 
         if getattr(args, "save_text_mask", False):
-            base_debug_dir = (
-                args.text_debug_dir
-                if getattr(args, "text_debug_dir", None)
-                else os.path.join(args.output, "text_guidance_debug")
-            )
-            debug_dir = base_debug_dir
-            if self.text_debug_stem:
-                debug_dir = os.path.join(base_debug_dir, self.text_debug_stem)
+            detection_debug = self.text_detector.get_debug_info()
+            for source_debug in detection_debug.values():
+                if isinstance(source_debug, dict):
+                    source_debug.setdefault("thresholds", {})
+                    source_debug["thresholds"]["text_min_area"] = args.text_min_area
             save_text_mask_debug(
                 debug_dir,
                 lq_np,
@@ -371,13 +507,28 @@ class Pipeline:
                     "text_guidance_start": args.text_guidance_start,
                     "text_guidance_stop": args.text_guidance_stop,
                     "text_guidance_mode": args.text_guidance_mode,
+                    "text_regional_noise": args.text_regional_noise,
+                    "text_noise_timestep_ratio": args.text_noise_timestep_ratio,
+                    "nontext_noise_timestep_ratio": args.nontext_noise_timestep_ratio,
+                    "text_noise_scale": args.text_noise_scale,
+                    "nontext_noise_scale": args.nontext_noise_scale,
+                    "text_latent_anchor": args.text_latent_anchor,
+                    "text_latent_anchor_alpha": args.text_latent_anchor_alpha,
                     "text_grad_clip": args.text_grad_clip,
                     "text_mask_dilate": args.text_mask_dilate,
                     "text_mask_blur": args.text_mask_blur,
                     "text_min_confidence": args.text_min_confidence,
                     "text_min_area": args.text_min_area,
                     "easyocr_langs": args.easyocr_langs,
+                    "easyocr_text_threshold": args.easyocr_text_threshold,
+                    "easyocr_low_text": args.easyocr_low_text,
+                    "easyocr_link_threshold": args.easyocr_link_threshold,
+                    "easyocr_canvas_size": args.easyocr_canvas_size,
+                    "easyocr_mag_ratio": args.easyocr_mag_ratio,
+                    "mask_before_postprocess_nonzero_ratio": before_ratio,
+                    "mask_after_postprocess_nonzero_ratio": after_ratio,
                 },
+                detection_debug=detection_debug,
             )
             print(f"[TextGuidance] saved debug masks to {debug_dir}")
 

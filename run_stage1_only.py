@@ -263,12 +263,14 @@ def main():
     else:
         raise ValueError(f"Unsupported cleaner_type: {args.cleaner_type}")
 
-    gt_dir = Path(args.gt_dir)
-    if not gt_dir.exists():
-        raise FileNotFoundError(f"GT directory not found: {gt_dir}")
+    gt_dir = Path(args.gt_dir) if args.gt_dir else None
+    lpips_metric = None
+    if gt_dir is not None and gt_dir.exists():
+        import lpips
 
-    import lpips
-    lpips_metric = lpips.LPIPS(net="alex").to(args.device)
+        lpips_metric = lpips.LPIPS(net="alex").to(args.device)
+    else:
+        print(f"[INFO] GT directory not found or empty: {args.gt_dir}. Stage1 metrics will be skipped.")
 
     pipeline = None
     if args.cleaner_type == "default":
@@ -340,6 +342,9 @@ def main():
             }
         )
         print(f"[SAVE] {save_path}")
+
+        if gt_dir is None or lpips_metric is None:
+            continue
 
         gt_path = gt_dir / img_path.name
         if not gt_path.exists():
