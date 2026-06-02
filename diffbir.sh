@@ -9,26 +9,27 @@ set -eo pipefail
 # ==========================================
 
 # ---------- Core ----------
-EXPERIMENT=${EXPERIMENT:-3}            # 실험 선택, options: 1=baseline Stage2 / 2=text guidance / 3=Stage1 text blend
+EXPERIMENT=${EXPERIMENT:-2}            # 실험 선택, options: 1=baseline Stage2 / 2=text guidance / 3=Stage1 text blend
 GPU=${GPU:-1}                          # 사용할 GPU id, 예: 0 / 1
 DEVICE=${DEVICE:-cuda}                 # 실행 device, options: cuda / cpu / mps
 PRECISION=${PRECISION:-fp16}           # 연산 precision, options: fp16 / fp32 / bf16
 SEED=${SEED:-42}                       # random seed, 결과 재현성 제어
 
-INPUT_DIR=${INPUT:-${INPUT_DIR:-inputs/demo/test_image_text}} # input image folder
-GT_DIR=${GT_DIR:-GT/test_image_text_GT} # GT folder, PSNR/SSIM/LPIPS 평가용
+INPUT_DIR=${INPUT:-${INPUT_DIR:-inputs/demo/input_test_one}} # input image folder
+GT_DIR=${GT_DIR:-GT/GT_one} # GT folder, PSNR/SSIM/LPIPS 평가용
 RESULTS_DIR=${RESULTS_DIR:-results}    # 결과 root directory
 
 TASK=${TASK:-sr}                       # DiffBIR task, options: sr / denoise / face / unaligned_face
 VERSION=${VERSION:-v2.1}               # DiffBIR version, options: v1 / v2 / v2.1
 UPSCALE=${UPSCALE:-1}                  # SR upscale factor
 STAGE1_MODEL=${STAGE1_MODEL:-restormer} # Stage1 restoration model, options: default / swinir / restormer / nafnet / mprnet
+LORA_CKPT=${LORA_CKPT-experiments/stage2_lora_text_train_20260528/checkpoints/lora_final.pt} # optional ControlNet LoRA checkpoint. Set LORA_CKPT="" to disable LoRA.
 
 SAMPLER=${SAMPLER:-spaced}             # Stage2 sampler, text guidance는 현재 spaced에서 적용
 STEPS=${STEPS:-50}                     # denoising steps, 클수록 느림
-CFG_SCALE=${CFG_SCALE:-3}              # prompt guidance scale, 낮추면 hallucination 감소 가능
+CFG_SCALE=${CFG_SCALE:-2.0}            # prompt guidance scale, 낮추면 hallucination 감소 가능
 START_POINT_TYPE=${START_POINT_TYPE:-cond} # Stage2 start point, options: cond / noise
-STRENGTH=${STRENGTH:-1.0}              # ControlNet strength, 낮추면 Stage2 자유도 감소
+STRENGTH=${STRENGTH:-0.7}              # ControlNet strength, 낮추면 Stage2 자유도 감소
 
 # ---------- Existing restoration guidance ----------
 GUIDANCE=${GUIDANCE:-true}             # 기존 Restoration Guidance 사용 여부, options: true / false
@@ -40,29 +41,29 @@ G_WEIGHT_GAMMA=${G_WEIGHT_GAMMA:-1.0}  # w_mse weight contrast, 클수록 weight
 G_REPEAT=${G_REPEAT:-1}                # step당 guidance update 반복 횟수, 클수록 느림
 
 # ---------- Text guidance for EXPERIMENT=2, optional in EXPERIMENT=3 ----------
-TEXT_GUIDANCE_SCALE=${TEXT_GUIDANCE_SCALE:-1.5} # text guidance 전체 strength
-TEXT_RGB_WEIGHT=${TEXT_RGB_WEIGHT:-1.5} # text RGB/color consistency weight
-TEXT_EDGE_WEIGHT=${TEXT_EDGE_WEIGHT:-4.0} # text stroke/edge consistency weight
-TEXT_GUIDANCE_MODE=${TEXT_GUIDANCE_MODE:-all} # text guidance schedule, options: all / late / early / fraction
-TEXT_GUIDANCE_STOP=${TEXT_GUIDANCE_STOP:-1.0} # schedule fraction, all에서는 1.0 유지
-TEXT_GRAD_CLIP=${TEXT_GRAD_CLIP:-0.10} # text gradient clipping, 과보정/NaN 방지
+TEXT_GUIDANCE_SCALE=${TEXT_GUIDANCE_SCALE:-0.8} # text guidance 전체 strength
+TEXT_RGB_WEIGHT=${TEXT_RGB_WEIGHT:-1.0} # text RGB/color consistency weight
+TEXT_EDGE_WEIGHT=${TEXT_EDGE_WEIGHT:-3.0} # text stroke/edge consistency weight
+TEXT_GUIDANCE_MODE=${TEXT_GUIDANCE_MODE:-late} # text guidance schedule, options: all / late / early / fraction
+TEXT_GUIDANCE_STOP=${TEXT_GUIDANCE_STOP:-0.35} # late에서는 마지막 fraction만 text guidance 적용
+TEXT_GRAD_CLIP=${TEXT_GRAD_CLIP:-0.05} # text gradient clipping, 과보정/NaN 방지
 
 TEXT_REGIONAL_NOISE=${TEXT_REGIONAL_NOISE:-true} # text/non-text 시작 noise 분리, options: true / false
-TEXT_NOISE_TIMESTEP_RATIO=${TEXT_NOISE_TIMESTEP_RATIO:-0.05} # text region start noise timestep ratio, 낮을수록 Stage1 text 보존
-NONTEXT_NOISE_TIMESTEP_RATIO=${NONTEXT_NOISE_TIMESTEP_RATIO:-1.0} # non-text start noise ratio, 1.0이면 기존 full-noise
-TEXT_NOISE_SCALE=${TEXT_NOISE_SCALE:-0.5} # text region random noise scale, 낮을수록 text 보존
+TEXT_NOISE_TIMESTEP_RATIO=${TEXT_NOISE_TIMESTEP_RATIO:-${TEXT_NOISE_RATIO:-0.01}} # text region start noise timestep ratio, 낮을수록 Stage1 text 보존
+NONTEXT_NOISE_TIMESTEP_RATIO=${NONTEXT_NOISE_TIMESTEP_RATIO:-${NON_TEXT_NOISE_RATIO:-1.0}} # non-text start noise ratio, 1.0이면 기존 full-noise
+TEXT_NOISE_SCALE=${TEXT_NOISE_SCALE:-0.2} # text region random noise scale, 낮을수록 text 보존
 NONTEXT_NOISE_SCALE=${NONTEXT_NOISE_SCALE:-1.0} # non-text random noise scale
 
 TEXT_LATENT_ANCHOR=${TEXT_LATENT_ANCHOR:-true} # 매 step 후 text latent를 Stage1 latent에 anchoring, options: true / false
-TEXT_LATENT_ANCHOR_ALPHA=${TEXT_LATENT_ANCHOR_ALPHA:-0.8} # anchoring strength, 1.0에 가까울수록 Stage1 text 유지
+TEXT_LATENT_ANCHOR_ALPHA=${TEXT_LATENT_ANCHOR_ALPHA:-0.85} # anchoring strength, 1.0에 가까울수록 Stage1 text 유지
 
 # ---------- Text detection ----------
 TEXT_SPOTTING_MODULE=${TEXT_SPOTTING_MODULE:-easyocr} # EXPERIMENT=2 text spotting backend, 현재 options: easyocr
 TEXT_MASK_SOURCE=${TEXT_MASK_SOURCE:-union} # mask source, options: union / stage1 / lq
-TEXT_MASK_DILATE=${TEXT_MASK_DILATE:-7} # text mask dilation pixel, 글자 주변까지 보호
-TEXT_MASK_BLUR=${TEXT_MASK_BLUR:-0.5}  # soft mask blur sigma, 경계 완화
-TEXT_MIN_CONFIDENCE=${TEXT_MIN_CONFIDENCE:-0.1} # EasyOCR confidence threshold, 낮을수록 recall 증가
-TEXT_MIN_AREA=${TEXT_MIN_AREA:-0}      # 최소 text polygon area, 작은 글자면 0 권장
+TEXT_MASK_DILATE=${TEXT_MASK_DILATE:-2} # text mask dilation pixel, 글자 주변까지 보호
+TEXT_MASK_BLUR=${TEXT_MASK_BLUR:-1.5}  # soft mask blur sigma, 경계 완화
+TEXT_MIN_CONFIDENCE=${TEXT_MIN_CONFIDENCE:-0.30} # EasyOCR confidence threshold, 낮을수록 recall 증가
+TEXT_MIN_AREA=${TEXT_MIN_AREA:-8}      # 최소 text polygon area, 작은 글자면 0 권장
 EASYOCR_LANGS=${EASYOCR_LANGS:-ko,en}  # EasyOCR language hints, 예: ko,en / en
 EASYOCR_TEXT_THRESHOLD=${EASYOCR_TEXT_THRESHOLD:-0.2} # EasyOCR text threshold, 낮을수록 흐린 글자 검출 증가
 EASYOCR_LOW_TEXT=${EASYOCR_LOW_TEXT:-0.1} # EasyOCR low_text threshold, 낮을수록 작은/약한 글자 검출 증가
@@ -127,17 +128,17 @@ S_NOISE=${S_NOISE:-1.0}
 # ---------- Mode selection ----------
 case "$EXPERIMENT" in
   1)
-    EXPERIMENT_NAME=${EXPERIMENT_NAME:-exp3_stage2_baseline}
+    EXPERIMENT_NAME=${EXPERIMENT_NAME:-exp3_1_baseline}
     TEXT_GUIDANCE=false
     PRESERVE_TEXT=false
     ;;
   2)
-    EXPERIMENT_NAME=${EXPERIMENT_NAME:-exp4_text_guidance}
+    EXPERIMENT_NAME=${EXPERIMENT_NAME:-exp5_1_conservative_text_anchor}
     TEXT_GUIDANCE=true
     PRESERVE_TEXT=false
     ;;
   3)
-    EXPERIMENT_NAME=${EXPERIMENT_NAME:-exp5_stage1_text_blend}
+    EXPERIMENT_NAME=${EXPERIMENT_NAME:-exp5_1_text_blend}
     TEXT_GUIDANCE=$EXP5_USE_TEXT_GUIDANCE
     PRESERVE_TEXT=true
     ;;
@@ -173,6 +174,10 @@ CMD+=(--sampler "$SAMPLER" --steps "$STEPS" --cfg_scale "$CFG_SCALE")
 CMD+=(--start_point_type "$START_POINT_TYPE")
 CMD+=(--captioner "$CAPTIONER" --precision "$PRECISION" --seed "$SEED" --device "$DEVICE")
 CMD+=(--stage1_model "$STAGE1_MODEL" --cleaner_type default)
+
+if [ -n "$LORA_CKPT" ]; then
+  CMD+=(--lora_ckpt "$LORA_CKPT")
+fi
 
 if [ -n "$STAGE1_CKPT" ]; then
   CMD+=(--stage1_ckpt "$STAGE1_CKPT")
@@ -263,6 +268,7 @@ echo "PRESERVE_TEXT=$PRESERVE_TEXT"
 echo "STAGE1_MODEL=$STAGE1_MODEL"
 echo "INPUT_DIR=$INPUT_DIR"
 echo "GT_DIR=$GT_DIR"
+echo "LORA_CKPT=$LORA_CKPT"
 echo "=========================================="
 
 # ---------- EXPERIMENT=3: Stage1 image for text replacement ----------

@@ -17,6 +17,7 @@ class PairedImageDataset(data.Dataset):
         self,
         lq_dir: str,
         gt_dir: str,
+        mask_dir: str = "",
         out_size: int = 512,
         crop_type: str = "random",
         prompt: str = "",
@@ -26,6 +27,7 @@ class PairedImageDataset(data.Dataset):
         super().__init__()
         self.lq_dir = lq_dir
         self.gt_dir = gt_dir
+        self.mask_dir = mask_dir
         self.out_size = out_size
         self.crop_type = crop_type
         self.prompt = prompt
@@ -54,22 +56,36 @@ class PairedImageDataset(data.Dataset):
                 f"Missing GT: {missing_gt[:5]}, missing LQ: {missing_lq[:5]}"
             )
 
-    def _load_pair(self, name: str) -> Tuple[Image.Image, Image.Image]:
+    def _load_pair(self, name: str) -> Tuple[Image.Image, Image.Image, Image.Image | None]:
         lq = Image.open(os.path.join(self.lq_dir, name)).convert("RGB")
         gt = Image.open(os.path.join(self.gt_dir, name)).convert("RGB")
         if lq.size != gt.size:
             raise ValueError(f"Pair {name} has different sizes: {lq.size} vs {gt.size}")
-        return lq, gt
+        mask = None
+        if self.mask_dir:
+            stem = os.path.splitext(name)[0]
+            mask_path = None
+            for ext in [".png", ".jpg", ".jpeg", ".webp", ".bmp"]:
+                candidate = os.path.join(self.mask_dir, f"{stem}{ext}")
+                if os.path.exists(candidate):
+                    mask_path = candidate
+                    break
+            if mask_path is None:
+                raise FileNotFoundError(f"Missing text mask for {name} in {self.mask_dir}")
+            mask = Image.open(mask_path).convert("L")
+            if mask.size != gt.size:
+                raise ValueError(f"Mask {mask_path} has different size: {mask.size} vs {gt.size}")
+        return lq, gt, mask
 
     def _resize_for_crop(
-        self, lq: Image.Image, gt: Image.Image
-    ) -> Tuple[Image.Image, Image.Image]:
+        self, lq: Image.Image, gt: Image.Image, mask: Image.Image | None = None
+    ) -> Tuple[Image.Image, Image.Image, Image.Image | None]:
         if self.crop_type == "none":
             if lq.size != (self.out_size, self.out_size):
                 raise ValueError(
                     f"crop_type='none' expects {self.out_size}x{self.out_size}, got {lq.size}"
                 )
-            return lq, gt
+            return lq, gt, mask
 
         width, height = lq.size
         scale = self.out_size / min(width, height)
@@ -77,13 +93,15 @@ class PairedImageDataset(data.Dataset):
         if new_size != lq.size:
             lq = lq.resize(new_size, resample=Image.BICUBIC)
             gt = gt.resize(new_size, resample=Image.BICUBIC)
-        return lq, gt
+            if mask is not None:
+                mask = mask.resize(new_size, resample=Image.NEAREST)
+        return lq, gt, mask
 
     def _crop_pair(
-        self, lq: Image.Image, gt: Image.Image
-    ) -> Tuple[Image.Image, Image.Image]:
+        self, lq: Image.Image, gt: Image.Image, mask: Image.Image | None = None
+    ) -> Tuple[Image.Image, Image.Image, Image.Image | None]:
         if self.crop_type == "none":
-            return lq, gt
+            return lq, gt, mask
 
         width, height = lq.size
         if width < self.out_size or height < self.out_size:
@@ -95,19 +113,24 @@ class PairedImageDataset(data.Dataset):
             left = random.randint(0, width - self.out_size)
             top = random.randint(0, height - self.out_size)
         box = (left, top, left + self.out_size, top + self.out_size)
-        return lq.crop(box), gt.crop(box)
+        cropped_mask = mask.crop(box) if mask is not None else None
+        return lq.crop(box), gt.crop(box), cropped_mask
 
     def __getitem__(self, index: int):
         name = self.names[index]
-        lq, gt = self._load_pair(name)
-        lq, gt = self._resize_for_crop(lq, gt)
-        lq, gt = self._crop_pair(lq, gt)
+        lq, gt, mask = self._load_pair(name)
+        lq, gt, mask = self._resize_for_crop(lq, gt, mask)
+        lq, gt, mask = self._crop_pair(lq, gt, mask)
 
         lq = (np.array(lq) / 255.0).astype(np.float32)
         gt = (np.array(gt) / 255.0).astype(np.float32)
         prompt = "" if random.random() < self.p_empty_prompt else self.prompt
 
-        return (gt * 2 - 1).astype(np.float32), lq, prompt
+        if mask is None:
+            return (gt * 2 - 1).astype(np.float32), lq, prompt
+
+        mask = (np.array(mask) / 255.0).astype(np.float32)
+        return (gt * 2 - 1).astype(np.float32), lq, prompt, mask[..., None]
 
     def __len__(self) -> int:
         return len(self.names)

@@ -80,7 +80,8 @@ class EasyOCRTextDetector(BaseTextDetector):
         try:
             import easyocr
 
-            self.reader = easyocr.Reader(list(self.langs), gpu=False, recognizer=False)
+            use_gpu = os.environ.get("EASYOCR_GPU", "").lower() in {"1", "true", "yes", "on"}
+            self.reader = easyocr.Reader(list(self.langs), gpu=use_gpu, recognizer=False)
             print("[TextDetection] EasyOCR backend initialized in detection-only mode (recognizer=False).")
         except ImportError:
             self.available = False
